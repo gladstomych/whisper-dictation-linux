@@ -48,6 +48,23 @@ SAMPLE_WIDTH = 2  # bytes per sample (S16LE)
 CHANNELS = 1
 
 
+class TranscriptionError(Exception):
+    """A failure worth surfacing to the user with a specific OSD message.
+
+    The KDE shortcut runs whisper-toggle with no terminal, so stderr is
+    invisible — the OSD is the only feedback. ``osd`` is the short line
+    shown to the user; the exception's message carries the full detail
+    for stderr/logs. ``icon`` picks the OSD glyph (a soft
+    "dialog-information" for benign outcomes like silence, "dialog-error"
+    for real failures).
+    """
+
+    def __init__(self, osd: str, detail: str = "", icon: str = "dialog-error"):
+        super().__init__(detail or osd)
+        self.osd = osd
+        self.icon = icon
+
+
 def _find_qdbus() -> str | None:
     """Return the first available qdbus binary name, or None."""
     for candidate in ("qdbus-qt6", "qdbus", "qdbus-qt5"):
@@ -187,8 +204,9 @@ def _transcribe_cloud(pcm) -> str:
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "WHISPER_BACKEND=cloud but OPENAI_API_KEY is not set in the environment"
+        raise TranscriptionError(
+            "⚠ No OpenAI API key set",
+            "WHISPER_BACKEND=cloud but OPENAI_API_KEY is not set in the environment",
         )
 
     wav = _pcm_to_wav_bytes(pcm)
@@ -225,8 +243,57 @@ def _transcribe_cloud(pcm) -> str:
             # response_format=text returns the transcript as the raw body.
             return resp.read().decode("utf-8").strip()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace").strip()
-        raise RuntimeError(f"OpenAI API error {exc.code}: {detail}") from exc
+        body = exc.read().decode("utf-8", "replace").strip()
+        osd_msg, detail = _openai_http_error(exc.code, body)
+        raise TranscriptionError(osd_msg, f"OpenAI API {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, TimeoutError):
+            raise TranscriptionError(
+                "⚠ OpenAI request timed out", str(reason)
+            ) from exc
+        raise TranscriptionError(
+            "⚠ Cannot reach OpenAI (network?)", str(reason)
+        ) from exc
+    except TimeoutError as exc:  # bare socket timeout on some Python builds
+        raise TranscriptionError("⚠ OpenAI request timed out", str(exc)) from exc
+
+
+def _openai_http_error(code: int, body: str) -> tuple[str, str]:
+    """Map an OpenAI HTTP error to a (short OSD line, detail) pair.
+
+    OpenAI returns JSON like {"error": {"message", "type", "code"}}; we
+    parse it to distinguish e.g. a bad key from an unknown model, and
+    fall back to the raw status when the body isn't the expected shape.
+    """
+    import json
+
+    detail = body
+    err_code = ""
+    try:
+        err = json.loads(body).get("error", {})
+        detail = err.get("message") or body
+        err_code = err.get("code") or err.get("type") or ""
+    except (ValueError, AttributeError):
+        pass
+
+    if code == 401 or err_code == "invalid_api_key":
+        osd_msg = "⚠ Invalid OpenAI API key"
+    elif code == 403:
+        osd_msg = "⚠ OpenAI access denied"
+    elif err_code in ("model_not_found", "invalid_model") or code == 404:
+        osd_msg = f"⚠ Unknown model: {OPENAI_MODEL}"
+    elif err_code == "insufficient_quota":
+        osd_msg = "⚠ OpenAI quota exceeded"
+    elif code == 429:
+        osd_msg = "⚠ OpenAI rate limited — retry"
+    elif code == 413:
+        osd_msg = "⚠ Recording too long for OpenAI"
+    elif 500 <= code < 600:
+        osd_msg = "⚠ OpenAI server error — retry"
+    else:
+        osd_msg = f"⚠ OpenAI error {code}"
+    return osd_msg, detail
 
 
 def transcribe_and_type() -> None:
@@ -236,25 +303,35 @@ def transcribe_and_type() -> None:
     try:
         pcm = np.fromfile(AUDIO_PATH, dtype=np.int16)
     except OSError as exc:
-        sys.stderr.write(f"whisper-toggle: cannot read audio file: {exc}\n")
-        return
+        raise TranscriptionError("⚠ No audio captured", str(exc)) from exc
 
     if len(pcm) < 1600:  # < 0.1s of audio
-        sys.stderr.write("whisper-toggle: too little audio captured, skipping\n")
-        return
+        raise TranscriptionError(
+            "⚫ Too little audio",
+            "too little audio captured, skipping",
+            icon="dialog-information",
+        )
 
     if DEFAULT_BACKEND.lower() == "cloud":
         text = _transcribe_cloud(pcm)
     else:
         text = _transcribe_local(pcm)
 
-    if text:
-        try:
-            subprocess.run(["ydotool", "type", "--", text], check=True)
-        except subprocess.CalledProcessError as exc:
-            sys.stderr.write(f"whisper-toggle: ydotool failed: {exc}\n")
-    else:
-        sys.stderr.write("whisper-toggle: no text recognized\n")
+    if not text:
+        raise TranscriptionError(
+            "⚫ No speech detected",
+            "no text recognized",
+            icon="dialog-information",
+        )
+
+    try:
+        subprocess.run(["ydotool", "type", "--", text], check=True)
+    except FileNotFoundError as exc:
+        raise TranscriptionError("⚠ ydotool not found", str(exc)) from exc
+    except subprocess.CalledProcessError as exc:
+        raise TranscriptionError(
+            "⚠ Typing failed (is ydotoold running?)", str(exc)
+        ) from exc
 
 
 def stop_recording_and_transcribe() -> None:
@@ -268,6 +345,11 @@ def stop_recording_and_transcribe() -> None:
 
     try:
         transcribe_and_type()
+    except TranscriptionError as exc:
+        # Known failure with a user-facing message; detail goes to stderr.
+        sys.stderr.write(f"whisper-toggle: {exc}\n")
+        osd(exc.icon, exc.osd)
+        return
     except Exception as exc:  # noqa: BLE001 - surface failure via OSD, not a crash
         sys.stderr.write(f"whisper-toggle: transcription failed: {exc}\n")
         osd("dialog-error", "⚠ Whisper failed")

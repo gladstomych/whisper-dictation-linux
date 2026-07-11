@@ -121,6 +121,27 @@ For CPU-only use, `base` or `small` is the sweet spot. If you have an
 NVIDIA GPU, set `WHISPER_DEVICE=cuda` and you can run `medium` or
 `large-v3` in real time.
 
+## Feedback & errors
+
+Because the hotkey runs `whisper-toggle` with no terminal, the KDE OSD is
+your only feedback. Failures show a specific message so you can tell them
+apart at a glance:
+
+| OSD                              | Meaning                                        |
+|----------------------------------|------------------------------------------------|
+| `⚫ No speech detected`           | Transcription ran but produced no text          |
+| `⚫ Too little audio`             | You toggled off almost immediately              |
+| `⚠ No OpenAI API key set`        | `WHISPER_BACKEND=cloud` but no `OPENAI_API_KEY` |
+| `⚠ Invalid OpenAI API key`       | Key rejected (401)                              |
+| `⚠ Unknown model: …`             | `OPENAI_TRANSCRIBE_MODEL` not recognized        |
+| `⚠ OpenAI quota exceeded`        | Billing/quota exhausted                         |
+| `⚠ OpenAI rate limited — retry`  | Too many requests; try again                     |
+| `⚠ Cannot reach OpenAI (network?)` | DNS/connection failure                        |
+| `⚠ Typing failed (is ydotoold running?)` | `ydotool` couldn't inject the text     |
+
+Full detail for any of these is written to stderr — run `whisper-toggle`
+from a terminal to see it when debugging.
+
 ## How it works
 
 ```
