@@ -17,7 +17,7 @@
 #   - udev rule for /dev/uinput
 #   - user in input group
 #   - whisper-dictation Python package via `uv tool install`
-#   - Whisper base model (~150 MB, downloaded on first transcription)
+#   - Whisper small model (~460 MB, downloaded on first transcription)
 #
 # Manual step left to the user: bind a KDE global shortcut to
 #   ~/.local/bin/whisper-toggle
@@ -25,7 +25,7 @@
 set -euo pipefail
 
 # ---------- config ----------
-REPO_DIR
+# REPO_DIR
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_BIN="${HOME}/.local/bin"
 STATE_DIR="${HOME}/.local/state/whisper-dictation-setup"
@@ -240,7 +240,7 @@ install() {
   cat >&2 <<EOF
 
 ------------------------------------------------------------
-Install complete. The Whisper "base" model (~150 MB) will be
+Install complete. The Whisper "small" model (~460 MB) will be
 downloaded automatically on your first toggle-off transcription.
 
 Remaining MANUAL steps:
@@ -405,12 +405,12 @@ case "${1:-}" in
   *) cat >&2 <<EOF
 Usage: $0 {install|uninstall}
 
-The Whisper model (default: base, ~150 MB) is downloaded on first
+The Whisper model (default: small, ~460 MB) is downloaded on first
 transcription, not during install. To pre-warm:
 
   uv run --with faster-whisper python -c \\
     "from faster_whisper import WhisperModel; \\
-     WhisperModel('base', device='cpu', compute_type='int8')"
+     WhisperModel('small', device='cpu', compute_type='int8')"
 
 To use a different model, set WHISPER_MODEL in the environment
 before invoking whisper-toggle (tiny/base/small/medium/large-v3).
