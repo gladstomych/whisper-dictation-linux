@@ -6,11 +6,18 @@ Uses faster-whisper for transcription, ydotool for input simulation,
 and the KDE OSD (via qdbus) for visual feedback.
 
 Configuration via environment variables:
-  WHISPER_MODEL   tiny | base | small | medium | large-v3   (default: base)
-  WHISPER_DEVICE  cpu | cuda                              (default: cpu)
-  WHISPER_LANG    en | fr | de | ...                      (default: en)
-  WHISPER_COOKIE  path to cookie file                     (default: /tmp/whisper-dictation.cookie)
-  WHISPER_AUDIO   path to raw PCM temp file               (default: /tmp/whisper-dictation-audio.raw)
+  WHISPER_BACKEND          local | cloud                  (default: local)
+  WHISPER_MODEL            tiny | base | small | medium | large-v3   (default: small)
+  WHISPER_DEVICE           cpu | cuda                      (default: cpu)
+  WHISPER_LANG             en | fr | de | ...              (default: en)
+  WHISPER_COOKIE           path to cookie file             (default: /tmp/whisper-dictation.cookie)
+  WHISPER_AUDIO            path to raw PCM temp file        (default: /tmp/whisper-dictation-audio.raw)
+
+Cloud backend (WHISPER_BACKEND=cloud) uses the OpenAI transcription API:
+  OPENAI_API_KEY           required when backend is cloud
+  OPENAI_TRANSCRIBE_MODEL  gpt-4o-transcribe | gpt-4o-mini-transcribe | whisper-1
+                                                           (default: gpt-4o-transcribe)
+  OPENAI_BASE_URL          override API base URL           (default: https://api.openai.com/v1)
 """
 from __future__ import annotations
 
@@ -27,9 +34,18 @@ _TMP = os.environ.get("TMPDIR", "/tmp")
 COOKIE_PATH = Path(os.environ.get("WHISPER_COOKIE", os.path.join(_TMP, "whisper-dictation.cookie")))
 AUDIO_PATH = Path(os.environ.get("WHISPER_AUDIO", os.path.join(_TMP, "whisper-dictation-audio.raw")))
 
-DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "base")
+DEFAULT_BACKEND = os.environ.get("WHISPER_BACKEND", "local")
+DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
 DEFAULT_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
 DEFAULT_LANG = os.environ.get("WHISPER_LANG", "en")
+
+OPENAI_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+# Audio capture format (parec args below must stay in sync with these).
+SAMPLE_RATE = 16000
+SAMPLE_WIDTH = 2  # bytes per sample (S16LE)
+CHANNELS = 1
 
 
 def _find_qdbus() -> str | None:
@@ -124,22 +140,13 @@ def stop_recorder(pid: int) -> None:
         pass
 
 
-def transcribe_and_type() -> None:
-    """Load the captured raw PCM, run Whisper, type the result via ydotool."""
-    # Lazy imports: toggle-on stays cheap, only toggle-off pays the model load.
+def _transcribe_local(pcm) -> str:
+    """Transcribe int16 PCM with a locally-run faster-whisper model."""
+    # Lazy imports: only the local backend pays the numpy/model load cost.
     import numpy as np
     from faster_whisper import WhisperModel
 
-    try:
-        audio = np.fromfile(AUDIO_PATH, dtype=np.int16)
-    except OSError as exc:
-        sys.stderr.write(f"whisper-toggle: cannot read audio file: {exc}\n")
-        return
-    audio = audio.astype(np.float32) / 32768.0
-
-    if len(audio) < 1600:  # < 0.1s of audio
-        sys.stderr.write("whisper-toggle: too little audio captured, skipping\n")
-        return
+    audio = pcm.astype(np.float32) / 32768.0
 
     model = WhisperModel(
         DEFAULT_MODEL,
@@ -155,7 +162,91 @@ def transcribe_and_type() -> None:
         without_timestamps=True,
     )
 
-    text = "".join(seg.text for seg in segments).strip()
+    return "".join(seg.text for seg in segments).strip()
+
+
+def _pcm_to_wav_bytes(pcm) -> bytes:
+    """Wrap raw int16 PCM in a WAV container (no re-encoding)."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(CHANNELS)
+        wav.setsampwidth(SAMPLE_WIDTH)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def _transcribe_cloud(pcm) -> str:
+    """Transcribe int16 PCM via the OpenAI transcription API (stdlib only)."""
+    import urllib.error
+    import urllib.request
+    import uuid
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "WHISPER_BACKEND=cloud but OPENAI_API_KEY is not set in the environment"
+        )
+
+    wav = _pcm_to_wav_bytes(pcm)
+
+    # Build a multipart/form-data body by hand to avoid pulling in the openai SDK.
+    boundary = f"----whisper-dictation-{uuid.uuid4().hex}"
+    fields = {"model": OPENAI_MODEL, "language": DEFAULT_LANG, "response_format": "text"}
+
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n".encode()
+        )
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+        f'filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n'.encode()
+    )
+    parts.append(wav)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        f"{OPENAI_BASE_URL}/audio/transcriptions",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            # response_format=text returns the transcript as the raw body.
+            return resp.read().decode("utf-8").strip()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace").strip()
+        raise RuntimeError(f"OpenAI API error {exc.code}: {detail}") from exc
+
+
+def transcribe_and_type() -> None:
+    """Load the captured raw PCM, transcribe it, type the result via ydotool."""
+    import numpy as np
+
+    try:
+        pcm = np.fromfile(AUDIO_PATH, dtype=np.int16)
+    except OSError as exc:
+        sys.stderr.write(f"whisper-toggle: cannot read audio file: {exc}\n")
+        return
+
+    if len(pcm) < 1600:  # < 0.1s of audio
+        sys.stderr.write("whisper-toggle: too little audio captured, skipping\n")
+        return
+
+    if DEFAULT_BACKEND.lower() == "cloud":
+        text = _transcribe_cloud(pcm)
+    else:
+        text = _transcribe_local(pcm)
 
     if text:
         try:

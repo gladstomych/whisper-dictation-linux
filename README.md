@@ -59,7 +59,7 @@ global shortcut to:
    buffer — exactly as if you had typed it yourself.
 
 Typical latency from "second hotkey press" to "text appears" is 1–3
-seconds on a modern CPU with the default `base` model.
+seconds on a modern CPU with the default `small` model.
 
 ## Configuration
 
@@ -67,11 +67,45 @@ Environment variables (set in your shell or the systemd unit):
 
 | Variable          | Default | Values                                   |
 |-------------------|---------|------------------------------------------|
-| `WHISPER_MODEL`   | `base`  | `tiny` `base` `small` `medium` `large-v3`|
+| `WHISPER_BACKEND` | `local` | `local` `cloud`                          |
+| `WHISPER_MODEL`   | `small` | `tiny` `base` `small` `medium` `large-v3`|
 | `WHISPER_DEVICE`  | `cpu`   | `cpu` `cuda`                             |
 | `WHISPER_LANG`    | `en`    | ISO 639-1 code                           |
 | `WHISPER_COOKIE`  | `/tmp/whisper-dictation.cookie` | Override cookie path        |
 | `WHISPER_AUDIO`   | `/tmp/whisper-dictation-audio.raw` | Override temp audio path  |
+
+`WHISPER_MODEL`/`WHISPER_DEVICE` apply to the `local` backend only.
+
+### Cloud backend (OpenAI)
+
+Set `WHISPER_BACKEND=cloud` to transcribe with OpenAI's hosted models
+instead of a local Whisper. This is more accurate (especially on accents,
+noise, and proper nouns) at the cost of network latency and per-request
+billing — and, of course, your audio leaves the machine. The local
+backend stays the default; cloud is fully opt-in.
+
+| Variable                  | Default             | Notes                                     |
+|---------------------------|---------------------|-------------------------------------------|
+| `OPENAI_API_KEY`          | *(required)*        | Your OpenAI API key                       |
+| `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | `gpt-4o-transcribe` `gpt-4o-mini-transcribe` `whisper-1` |
+| `OPENAI_BASE_URL`         | `https://api.openai.com/v1` | For proxies / compatible endpoints |
+
+`gpt-4o-transcribe` is the most accurate; `gpt-4o-mini-transcribe` is
+cheaper and slightly less accurate; `whisper-1` is the original API model.
+No extra Python dependencies are needed — the cloud path uses only the
+standard library.
+
+Because the KDE global shortcut runs `whisper-toggle` with the session
+environment (not your interactive shell), export the key where that
+environment is set — e.g. add to `~/.config/environment.d/whisper.conf`:
+
+```ini
+WHISPER_BACKEND=cloud
+OPENAI_API_KEY=sk-...
+```
+
+then log out and back in. (Testing from a terminal, a normal `export`
+in your shell is enough.)
 
 ### Model sizes (approximate, English)
 
@@ -103,6 +137,10 @@ NVIDIA GPU, set `WHISPER_DEVICE=cuda` and you can run `medium` or
 │  - shows KDE OSD via qdbus (auto-detect) │
 └──────────────────────────────────────────┘
 ```
+
+With `WHISPER_BACKEND=cloud`, the middle box is swapped for a call to the
+OpenAI transcription API (the captured PCM is wrapped in a WAV container
+and POSTed); the recorder and typing stages are unchanged.
 
 The toggle state is tracked via a cookie file containing the recorder's
 PID. A dead PID is treated as "not running" so a crashed session can
