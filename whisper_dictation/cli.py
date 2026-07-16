@@ -12,12 +12,15 @@ Configuration via environment variables:
   WHISPER_LANG             en | fr | de | ...              (default: en)
   WHISPER_COOKIE           path to cookie file             (default: /tmp/whisper-dictation.cookie)
   WHISPER_AUDIO            path to raw PCM temp file        (default: /tmp/whisper-dictation-audio.raw)
+  WHISPER_DEBUG            1 to archive each session's audio + transcript (default: off)
+  WHISPER_DEBUG_DIR        where debug artifacts go        (default: ~/.cache/whisper-dictation)
 
 Cloud backend (WHISPER_BACKEND=cloud) uses the OpenAI transcription API:
   OPENAI_API_KEY           required when backend is cloud
   OPENAI_TRANSCRIBE_MODEL  gpt-4o-transcribe | gpt-4o-mini-transcribe | whisper-1
                                                            (default: gpt-4o-transcribe)
   OPENAI_BASE_URL          override API base URL           (default: https://api.openai.com/v1)
+  WHISPER_HTTP_TIMEOUT     API request timeout, seconds    (default: 300)
 """
 from __future__ import annotations
 
@@ -41,6 +44,16 @@ DEFAULT_LANG = os.environ.get("WHISPER_LANG", "en")
 
 OPENAI_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+HTTP_TIMEOUT = int(os.environ.get("WHISPER_HTTP_TIMEOUT", "300"))
+
+# OpenAI's hard upload limit is 25 MB. Over it, the endpoint does NOT reject
+# the request — it returns 200 with a silently truncated transcript — so we
+# must guard the size ourselves rather than rely on an HTTP error.
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+DEBUG = os.environ.get("WHISPER_DEBUG", "") not in ("", "0", "false", "False", "no")
+_CACHE = os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache"))
+DEBUG_DIR = Path(os.environ.get("WHISPER_DEBUG_DIR", os.path.join(_CACHE, "whisper-dictation")))
 
 # Audio capture format (parec args below must stay in sync with these).
 SAMPLE_RATE = 16000
@@ -211,6 +224,14 @@ def _transcribe_cloud(pcm) -> str:
 
     wav = _pcm_to_wav_bytes(pcm)
 
+    if len(wav) > MAX_UPLOAD_BYTES:
+        minutes = len(pcm) / SAMPLE_RATE / 60
+        raise TranscriptionError(
+            "⚠ Recording too long — split it",
+            f"WAV is {len(wav) / 1024 / 1024:.1f} MB ({minutes:.1f} min); OpenAI's "
+            f"limit is 25 MB (~13 min of 16kHz mono) and silently truncates above it",
+        )
+
     # Build a multipart/form-data body by hand to avoid pulling in the openai SDK.
     boundary = f"----whisper-dictation-{uuid.uuid4().hex}"
     fields = {"model": OPENAI_MODEL, "language": DEFAULT_LANG, "response_format": "text"}
@@ -239,7 +260,7 @@ def _transcribe_cloud(pcm) -> str:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             # response_format=text returns the transcript as the raw body.
             return resp.read().decode("utf-8").strip()
     except urllib.error.HTTPError as exc:
@@ -296,6 +317,17 @@ def _openai_http_error(code: int, body: str) -> tuple[str, str]:
     return osd_msg, detail
 
 
+def _debug_save(name: str, data: bytes) -> None:
+    """Best-effort archive of a debug artifact; never raises into the flow."""
+    try:
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        path = DEBUG_DIR / name
+        path.write_bytes(data)
+        sys.stderr.write(f"whisper-toggle: [debug] wrote {path}\n")
+    except OSError as exc:
+        sys.stderr.write(f"whisper-toggle: [debug] save failed: {exc}\n")
+
+
 def transcribe_and_type() -> None:
     """Load the captured raw PCM, transcribe it, type the result via ydotool."""
     import numpy as np
@@ -304,6 +336,13 @@ def transcribe_and_type() -> None:
         pcm = np.fromfile(AUDIO_PATH, dtype=np.int16)
     except OSError as exc:
         raise TranscriptionError("⚠ No audio captured", str(exc)) from exc
+
+    # WHISPER_DEBUG: archive the exact audio (playable WAV) before transcribing,
+    # so a later "half is missing" can be diagnosed as capture vs. API by
+    # comparing this file against the saved transcript below.
+    stamp = time.strftime("%Y%m%d-%H%M%S") if DEBUG else ""
+    if DEBUG:
+        _debug_save(f"{stamp}.wav", _pcm_to_wav_bytes(pcm))
 
     if len(pcm) < 1600:  # < 0.1s of audio
         raise TranscriptionError(
@@ -316,6 +355,11 @@ def transcribe_and_type() -> None:
         text = _transcribe_cloud(pcm)
     else:
         text = _transcribe_local(pcm)
+
+    if DEBUG:
+        # Saved even when empty — an empty .txt next to a full .wav is itself
+        # the diagnosis (audio captured fine, transcription returned nothing).
+        _debug_save(f"{stamp}.txt", text.encode("utf-8"))
 
     if not text:
         raise TranscriptionError(

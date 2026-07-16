@@ -73,6 +73,8 @@ Environment variables (set in your shell or the systemd unit):
 | `WHISPER_LANG`    | `en`    | ISO 639-1 code                           |
 | `WHISPER_COOKIE`  | `/tmp/whisper-dictation.cookie` | Override cookie path        |
 | `WHISPER_AUDIO`   | `/tmp/whisper-dictation-audio.raw` | Override temp audio path  |
+| `WHISPER_DEBUG`   | *(off)* | `1` to archive each session's audio + transcript |
+| `WHISPER_DEBUG_DIR` | `~/.cache/whisper-dictation` | Where debug artifacts are written |
 
 `WHISPER_MODEL`/`WHISPER_DEVICE` apply to the `local` backend only.
 
@@ -89,6 +91,15 @@ backend stays the default; cloud is fully opt-in.
 | `OPENAI_API_KEY`          | *(required)*        | Your OpenAI API key                       |
 | `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | `gpt-4o-transcribe` `gpt-4o-mini-transcribe` `whisper-1` |
 | `OPENAI_BASE_URL`         | `https://api.openai.com/v1` | For proxies / compatible endpoints |
+| `WHISPER_HTTP_TIMEOUT`    | `300`               | API request timeout, seconds              |
+
+**Length limit:** OpenAI caps uploads at 25 MB. Since audio is sent as
+uncompressed 16 kHz mono WAV (~1.9 MB/min), that's about **13 minutes** per
+recording. Critically, the API does *not* reject an over-limit file — it
+returns a *silently truncated* transcript — so whisper-dictation checks the
+size itself and shows `⚠ Recording too long — split it` instead of letting
+you lose the tail. Keep individual dictations under ~13 min on the cloud
+backend.
 
 `gpt-4o-transcribe` is the most accurate; `gpt-4o-mini-transcribe` is
 cheaper and slightly less accurate; `whisper-1` is the original API model.
