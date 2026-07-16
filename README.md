@@ -75,6 +75,7 @@ Environment variables (set in your shell or the systemd unit):
 | `WHISPER_AUDIO`   | `/tmp/whisper-dictation-audio.raw` | Override temp audio path  |
 | `WHISPER_DEBUG`   | *(off)* | `1` to archive each session's audio + transcript |
 | `WHISPER_DEBUG_DIR` | `~/.cache/whisper-dictation` | Where debug artifacts are written |
+| `WHISPER_PAREC_LATENCY_MS` | `30` | parec capture latency; low avoids losing the start of speech |
 
 `WHISPER_MODEL`/`WHISPER_DEVICE` apply to the `local` backend only.
 

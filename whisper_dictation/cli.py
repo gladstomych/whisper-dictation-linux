@@ -60,6 +60,11 @@ SAMPLE_RATE = 16000
 SAMPLE_WIDTH = 2  # bytes per sample (S16LE)
 CHANNELS = 1
 
+# parec's default buffer delays the first samples by ~2s, which silently
+# eats the start of every recording (you start talking before capture is
+# actually flowing). A low target latency makes it stream near-immediately.
+PAREC_LATENCY_MS = int(os.environ.get("WHISPER_PAREC_LATENCY_MS", "30"))
+
 
 class TranscriptionError(Exception):
     """A failure worth surfacing to the user with a specific OSD message.
@@ -140,6 +145,7 @@ def start_recording() -> int:
             [
                 "parec", "--raw",
                 "--format=S16LE", "--rate=16000", "--channels=1",
+                f"--latency-msec={PAREC_LATENCY_MS}",
             ],
             stdout=out,
             stderr=subprocess.DEVNULL,
