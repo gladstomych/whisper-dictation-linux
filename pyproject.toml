@@ -1,6 +1,6 @@
 [project]
 name = "whisper-dictation"
-version = "0.8.0"
+version = "0.8.1"
 description = "Offline Whisper-based dictation for Linux desktops (KDE Wayland)."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -294,13 +294,15 @@ def is_running(pid: int | None = None) -> bool:
         return False
 
 
-def start_recording() -> int:
+def start_recording(translate: bool = False) -> int:
     """Begin capturing 16kHz mono s16le PCM with parec. Returns recorder PID."""
     AUDIO_PATH.unlink(missing_ok=True)
     COOKIE_PATH.unlink(missing_ok=True)
 
-    # Pinned indicator, kept on screen until transcription finishes.
-    _spawn_osd_daemon("microphone-sensitivity-high", "🔴 Whisper recording…")
+    # Pinned indicator, kept on screen until transcription finishes. Flag
+    # translate mode up front so it's visible while recording, not just at stop.
+    label = "🔴 Whisper recording (translate)…" if translate else "🔴 Whisper recording…"
+    _spawn_osd_daemon("microphone-sensitivity-high", label)
 
     out = open(AUDIO_PATH, "wb")  # noqa: SIM115 - we want a raw FD for the child
     try:
@@ -702,7 +704,7 @@ def main() -> int:
     if is_running():
         stop_recording_and_transcribe(translate=args.translate)
     else:
-        start_recording()
+        start_recording(translate=args.translate)
     return 0
 
 
