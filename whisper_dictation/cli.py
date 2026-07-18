@@ -1,7 +1,10 @@
 """
 Whisper-based dictation toggle.
 
-Press once to start recording, again to stop and transcribe.
+Press once to start recording, again to stop and transcribe. Pass --translate
+on the stopping press to translate the speech to English instead (bind a
+second global shortcut to `whisper-toggle --translate`).
+
 Uses faster-whisper for transcription, ydotool for input simulation,
 and the KDE OSD (via qdbus) for visual feedback.
 
@@ -10,6 +13,8 @@ Configuration via environment variables:
   WHISPER_MODEL            tiny | base | small | medium | large-v3   (default: small)
   WHISPER_DEVICE           cpu | cuda                      (default: cpu)
   WHISPER_LANG             en | fr | de | ...              (default: en)
+  WHISPER_VOCAB_FILE       custom-vocabulary file (.txt lines or .json list)
+                                       (default: ~/.config/whisper-dictation/vocab.txt)
   WHISPER_COOKIE           path to cookie file             (default: /tmp/whisper-dictation.cookie)
   WHISPER_AUDIO            path to raw PCM temp file        (default: /tmp/whisper-dictation-audio.raw)
   WHISPER_DEBUG            1 to archive each session's audio + transcript (default: off)
@@ -97,6 +102,42 @@ OPENAI_PROMPT = os.environ.get(
     "Transcribe the audio verbatim. Output every word exactly as spoken; "
     "do not omit, summarize, translate, or add anything.",
 )
+
+# Custom vocabulary: names, jargon, spellings the model should recognize. Fed
+# to both backends as prompt/initial_prompt biasing. Plain text (one term or
+# phrase per line, '#' comments ignored) or a .json file (a list of strings, or
+# {"terms"|"vocabulary": [...]}). Missing file = no biasing.
+_CFG = os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config"))
+VOCAB_FILE = Path(
+    os.environ.get("WHISPER_VOCAB_FILE", os.path.join(_CFG, "whisper-dictation", "vocab.txt"))
+)
+
+
+def _load_vocab() -> str | None:
+    """Load custom vocabulary as a single biasing string, or None if unavailable."""
+    try:
+        raw = VOCAB_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    terms: list[str]
+    if VOCAB_FILE.suffix == ".json":
+        import json
+
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            sys.stderr.write(f"whisper-toggle: bad vocab JSON {VOCAB_FILE}: {exc}\n")
+            return None
+        if isinstance(data, dict):
+            data = data.get("terms") or data.get("vocabulary") or []
+        terms = [str(t).strip() for t in data if str(t).strip()]
+    else:
+        terms = [
+            line.strip()
+            for line in raw.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    return ", ".join(terms) if terms else None
 
 # API-key resolution. Prefer a secret manager over a plaintext env var: an
 # exported key lives in the session environment, readable by every process
@@ -298,8 +339,8 @@ def stop_recorder(pid: int) -> None:
         pass
 
 
-def _transcribe_local(pcm) -> str:
-    """Transcribe int16 PCM with a locally-run faster-whisper model."""
+def _transcribe_local(pcm, translate: bool = False) -> str:
+    """Transcribe (or translate-to-English) int16 PCM with faster-whisper."""
     # Lazy imports: only the local backend pays the numpy/model load cost.
     import numpy as np
     from faster_whisper import WhisperModel
@@ -314,7 +355,10 @@ def _transcribe_local(pcm) -> str:
 
     segments, _ = model.transcribe(
         audio,
-        language=DEFAULT_LANG,
+        # Translation auto-detects the source language; transcription honors it.
+        language=None if translate else DEFAULT_LANG,
+        task="translate" if translate else "transcribe",
+        initial_prompt=_load_vocab(),
         beam_size=1,
         vad_filter=True,
         without_timestamps=True,
@@ -391,8 +435,13 @@ def _get_api_key() -> str | None:
     return _secret_tool_lookup()
 
 
-def _transcribe_cloud(pcm) -> str:
-    """Transcribe int16 PCM via the OpenAI transcription API (stdlib only)."""
+def _transcribe_cloud(pcm, translate: bool = False) -> str:
+    """Transcribe, or translate-to-English, int16 PCM via the OpenAI API.
+
+    Translation uses OpenAI's /audio/translations endpoint, which only supports
+    whisper-1 — so the configured OPENAI_TRANSCRIBE_MODEL is ignored in that
+    mode. Custom vocabulary biases both modes.
+    """
     import urllib.error
     import urllib.request
     import uuid
@@ -415,16 +464,28 @@ def _transcribe_cloud(pcm) -> str:
             f"limit is 25 MB (~13 min of 16kHz mono) and silently truncates above it",
         )
 
+    vocab = _load_vocab()
+
     # Build a multipart/form-data body by hand to avoid pulling in the openai SDK.
     boundary = f"----whisper-dictation-{uuid.uuid4().hex}"
-    fields = {
-        "model": OPENAI_MODEL,
-        "language": DEFAULT_LANG,
-        "response_format": "text",
-        "temperature": "0",
-    }
-    if OPENAI_PROMPT:
-        fields["prompt"] = OPENAI_PROMPT
+    if translate:
+        # /audio/translations always outputs English and only accepts whisper-1.
+        endpoint = "/audio/translations"
+        fields = {"model": "whisper-1", "response_format": "text", "temperature": "0"}
+        prompt = vocab  # whisper-1 uses prompt purely as spelling/term biasing
+    else:
+        endpoint = "/audio/transcriptions"
+        fields = {
+            "model": OPENAI_MODEL,
+            "language": DEFAULT_LANG,
+            "response_format": "text",
+            "temperature": "0",
+        }
+        prompt = OPENAI_PROMPT
+        if vocab:
+            prompt = f"{prompt} Terms that may appear verbatim: {vocab}.".strip()
+    if prompt:
+        fields["prompt"] = prompt
 
     parts: list[bytes] = []
     for name, value in fields.items():
@@ -441,7 +502,7 @@ def _transcribe_cloud(pcm) -> str:
     body = b"".join(parts)
 
     req = urllib.request.Request(
-        f"{OPENAI_BASE_URL}/audio/transcriptions",
+        f"{OPENAI_BASE_URL}{endpoint}",
         data=body,
         method="POST",
         headers={
@@ -534,7 +595,7 @@ def _debug_save(name: str, data: bytes) -> None:
         sys.stderr.write(f"whisper-toggle: [debug] save failed: {exc}\n")
 
 
-def transcribe_and_type() -> None:
+def transcribe_and_type(translate: bool = False) -> None:
     """Load the captured raw PCM, transcribe it, type the result via ydotool."""
     import numpy as np
 
@@ -558,9 +619,9 @@ def transcribe_and_type() -> None:
         )
 
     if DEFAULT_BACKEND.lower() == "cloud":
-        text = _transcribe_cloud(pcm)
+        text = _transcribe_cloud(pcm, translate)
     else:
-        text = _transcribe_local(pcm)
+        text = _transcribe_local(pcm, translate)
 
     if DEBUG:
         # Saved even when empty — an empty .txt next to a full .wav is itself
@@ -584,20 +645,22 @@ def transcribe_and_type() -> None:
         ) from exc
 
 
-def stop_recording_and_transcribe() -> None:
+def stop_recording_and_transcribe(translate: bool = False) -> None:
     pid = read_cookie_pid()
     COOKIE_PATH.unlink(missing_ok=True)
     if pid is None:
         return
 
     stop_recorder(pid)
-    # Keep the indicator pinned — now as "transcribing" — through the model/API
-    # call, which is the part with no other sign it's still working.
-    _spawn_osd_daemon("view-refresh", "Whisper transcribing…")
+    # Keep the indicator pinned through the model/API call, which is the part
+    # with no other sign it's still working.
+    _spawn_osd_daemon(
+        "view-refresh", "Whisper translating…" if translate else "Whisper transcribing…"
+    )
 
     failure: tuple[str, str] | None = None
     try:
-        transcribe_and_type()
+        transcribe_and_type(translate)
     except TranscriptionError as exc:
         # Known failure with a user-facing message; detail goes to stderr.
         sys.stderr.write(f"whisper-toggle: {exc}\n")
@@ -620,6 +683,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Toggle Whisper-based dictation on/off.",
     )
+    parser.add_argument(
+        "--translate",
+        action="store_true",
+        help="Translate speech to English (bind a second shortcut to this). "
+        "The mode is decided on the stopping press.",
+    )
     # Internal: run the OSD keep-alive loop (spawned by _spawn_osd_daemon).
     parser.add_argument(
         "--osd-daemon", nargs=2, metavar=("ICON", "TEXT"), help=argparse.SUPPRESS
@@ -631,7 +700,7 @@ def main() -> int:
         return 0
 
     if is_running():
-        stop_recording_and_transcribe()
+        stop_recording_and_transcribe(translate=args.translate)
     else:
         start_recording()
     return 0

@@ -51,11 +51,46 @@ which the KDE shortcut doesn't see.
 | `WHISPER_MODEL`   | `small` | `tiny` `base` `small` `medium` `large-v3` (local only) |
 | `WHISPER_DEVICE`  | `cpu`   | `cpu` `cuda` (local only)                |
 | `WHISPER_LANG`    | `en`    | ISO 639-1 code                           |
+| `WHISPER_VOCAB_FILE` | `~/.config/whisper-dictation/vocab.txt` | Custom vocabulary (see below) |
 | `WHISPER_DEBUG`   | *(off)* | `1` archives each session's audio + transcript |
 | `WHISPER_DEBUG_DIR` | `~/.cache/whisper-dictation` | Debug artifact directory |
 
 `WHISPER_DEBUG=1` writes a `.wav` + `.txt` per session and never prunes them
 — leave it off for normal use, and clear the directory when done.
+
+### Custom vocabulary
+
+Names, jargon, and spellings the model should get right (coworker names,
+`kubectl`, project codenames). Put them in `~/.config/whisper-dictation/vocab.txt`,
+one term or phrase per line (`#` comments and blank lines ignored):
+
+```
+# people
+Sunny Chau
+# tech
+kubectl
+Anthropic
+```
+
+A `.json` file (a list of strings, or `{"terms": [...]}`) works too — point
+`WHISPER_VOCAB_FILE` at it. The terms bias both backends (as Whisper
+`initial_prompt` locally, appended to the API prompt for cloud). No file = no
+biasing.
+
+### Translation
+
+Pass `--translate` to translate speech **to English** instead of transcribing
+it verbatim — dictate in your mother tongue, get English text. Bind a *second*
+global shortcut to:
+
+```
+~/.local/bin/whisper-toggle --translate
+```
+
+Toggle it like the normal one (start, speak, stop). The mode is decided on the
+**stopping** press, so use the same shortcut for both presses. On the cloud
+backend, translation uses OpenAI's `/audio/translations` endpoint (whisper-1),
+so `OPENAI_TRANSCRIBE_MODEL` doesn't apply in that mode.
 
 ### Switching backends
 
