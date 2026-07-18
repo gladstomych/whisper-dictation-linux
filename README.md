@@ -77,6 +77,10 @@ A `.json` file (a list of strings, or `{"terms": [...]}`) works too — point
 `initial_prompt` locally, appended to the API prompt for cloud). No file = no
 biasing.
 
+To build a sheet automatically from a machine's repos, contacts, and Claude
+session history, point a coding agent at [`tools/vocab-agent.md`](tools/vocab-agent.md)
+— it extracts and ranks candidate terms, you approve them, it writes the file.
+
 ### Translation
 
 Pass `--translate` to translate speech **to English** instead of transcribing
