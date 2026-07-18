@@ -244,9 +244,14 @@ setup_cloud_env() {
     warn "Ensure it contains: WHISPER_BACKEND=cloud and OPENAI_API_KEY=sk-..."
   else
     cat > "$ENVD_CONF" <<'EOF'
-# whisper-dictation cloud backend (OpenAI). Fill in your key below.
+# whisper-dictation cloud backend (OpenAI).
 WHISPER_BACKEND=cloud
+# Provide the key ONE of these ways (first match wins):
+#   1. plaintext below (simplest, least safe — readable by all your processes)
 OPENAI_API_KEY=
+#   2. a command that prints it:  OPENAI_API_KEY_CMD=pass show openai/api
+#   3. secret-tool (KWallet). Leave OPENAI_API_KEY empty and run once:
+#        secret-tool store --label='OpenAI API key' service openai-api-key
 # Optional overrides:
 # OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
 # WHISPER_HTTP_RETRIES=2

@@ -16,11 +16,18 @@ Configuration via environment variables:
   WHISPER_DEBUG_DIR        where debug artifacts go        (default: ~/.cache/whisper-dictation)
 
 Cloud backend (WHISPER_BACKEND=cloud) uses the OpenAI transcription API:
-  OPENAI_API_KEY           required when backend is cloud
   OPENAI_TRANSCRIBE_MODEL  gpt-4o-transcribe | gpt-4o-mini-transcribe | whisper-1
                                                            (default: gpt-4o-transcribe)
   OPENAI_BASE_URL          override API base URL           (default: https://api.openai.com/v1)
   WHISPER_HTTP_TIMEOUT     API request timeout, seconds    (default: 300)
+  WHISPER_HTTP_RETRIES     retries on transient 429/5xx    (default: 2)
+
+The API key is resolved at call time, in order (see _get_api_key):
+  1. OPENAI_API_KEY          plaintext env var (terminal testing; wins if set)
+  2. OPENAI_API_KEY_CMD      shell command that prints the key (e.g. pass/gopass)
+  3. secret-tool (libsecret / KWallet), on WHISPER_SECRET_TOOL_ATTRS
+                                         (default: "service openai-api-key")
+Prefer 2 or 3 over 1: an exported key is readable by every process you run.
 """
 from __future__ import annotations
 
@@ -66,6 +73,21 @@ DEFAULT_LANG = os.environ.get("WHISPER_LANG", "en")
 OPENAI_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 HTTP_TIMEOUT = _env_int("WHISPER_HTTP_TIMEOUT", 300)
+
+# API-key resolution. Prefer a secret manager over a plaintext env var: an
+# exported key lives in the session environment, readable by every process
+# the user runs (via /proc/PID/environ). The key is resolved at call time
+# (not import) so the wallet can be unlocked lazily, in this order:
+#   1. OPENAI_API_KEY env var           (terminal testing; wins if set)
+#   2. OPENAI_API_KEY_CMD               (a shell command that prints the key,
+#                                        e.g. "pass show openai/api")
+#   3. secret-tool (libsecret / KWallet) lookup on SECRET_TOOL_ATTRS
+OPENAI_API_KEY_CMD = os.environ.get("OPENAI_API_KEY_CMD", "")
+# Attribute pair the key is stored under; keep in sync with the README's
+# `secret-tool store` command. Overridable for users with an existing entry.
+SECRET_TOOL_ATTRS = os.environ.get(
+    "WHISPER_SECRET_TOOL_ATTRS", "service openai-api-key"
+).split()
 
 # Transient failures (429 rate-limit, 5xx server) are retried a few times
 # before giving up, since the captured audio is discarded after the toggle
@@ -242,17 +264,72 @@ def _pcm_to_wav_bytes(pcm) -> bytes:
     return buf.getvalue()
 
 
+def _run_key_cmd(cmd: str) -> str | None:
+    """Run a shell command that prints the API key on stdout; None on failure."""
+    try:
+        out = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=15
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"whisper-toggle: OPENAI_API_KEY_CMD timed out: {cmd!r}\n")
+        return None
+    if out.returncode != 0:
+        sys.stderr.write(
+            f"whisper-toggle: OPENAI_API_KEY_CMD failed ({out.returncode}): "
+            f"{out.stderr.strip()}\n"
+        )
+        return None
+    return out.stdout.strip() or None
+
+
+def _secret_tool_lookup() -> str | None:
+    """Look the key up in libsecret / KWallet via secret-tool; None if absent."""
+    if not shutil.which("secret-tool"):
+        return None
+    try:
+        out = subprocess.run(
+            ["secret-tool", "lookup", *SECRET_TOOL_ATTRS],
+            capture_output=True,
+            text=True,
+            timeout=30,  # may block on a wallet-unlock prompt
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write("whisper-toggle: secret-tool lookup timed out\n")
+        return None
+    # rc != 0 (typically 1) just means "no such secret" — not an error here.
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
+def _get_api_key() -> str | None:
+    """Resolve the OpenAI API key: env var, then key command, then secret store.
+
+    Resolved at call time so a secret manager can prompt to unlock lazily,
+    rather than forcing it at import (which the toggle-on path never needs).
+    """
+    env = os.environ.get("OPENAI_API_KEY")
+    if env:
+        return env
+    if OPENAI_API_KEY_CMD:
+        key = _run_key_cmd(OPENAI_API_KEY_CMD)
+        if key:
+            return key
+    return _secret_tool_lookup()
+
+
 def _transcribe_cloud(pcm) -> str:
     """Transcribe int16 PCM via the OpenAI transcription API (stdlib only)."""
     import urllib.error
     import urllib.request
     import uuid
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = _get_api_key()
     if not api_key:
         raise TranscriptionError(
-            "⚠ No OpenAI API key set",
-            "WHISPER_BACKEND=cloud but OPENAI_API_KEY is not set in the environment",
+            "⚠ No OpenAI API key found",
+            "no key from OPENAI_API_KEY, OPENAI_API_KEY_CMD, or secret-tool "
+            f"({' '.join(SECRET_TOOL_ATTRS)})",
         )
 
     wav = _pcm_to_wav_bytes(pcm)

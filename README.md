@@ -97,11 +97,17 @@ backend stays the default; cloud is fully opt-in.
 
 | Variable                  | Default             | Notes                                     |
 |---------------------------|---------------------|-------------------------------------------|
-| `OPENAI_API_KEY`          | *(required)*        | Your OpenAI API key                       |
+| `OPENAI_API_KEY`          | *(one of three)*    | Plaintext key. Simplest, least safe — see "Storing the key" |
+| `OPENAI_API_KEY_CMD`      | *(unset)*           | Command that prints the key, e.g. `pass show openai/api` |
+| `WHISPER_SECRET_TOOL_ATTRS` | `service openai-api-key` | Attributes `secret-tool` looks the key up under |
 | `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | `gpt-4o-transcribe` `gpt-4o-mini-transcribe` `whisper-1` |
 | `OPENAI_BASE_URL`         | `https://api.openai.com/v1` | For proxies / compatible endpoints |
 | `WHISPER_HTTP_TIMEOUT`    | `300`               | API request timeout, seconds              |
 | `WHISPER_HTTP_RETRIES`    | `2`                 | Retries on transient 429 / 5xx before giving up |
+
+The key is resolved at transcription time, first match wins:
+**`OPENAI_API_KEY`** → **`OPENAI_API_KEY_CMD`** → **`secret-tool`** (libsecret /
+KWallet). At least one must yield a key.
 
 **Length limit:** OpenAI caps uploads at 25 MB. Since audio is sent as
 uncompressed 16 kHz mono WAV (~1.9 MB/min), that's about **13 minutes** per
@@ -142,6 +148,37 @@ chmod 600 ~/.config/environment.d/whisper.conf
 
 The same applies to any `.env` you keep in the repo — `chmod 600 .env`.
 
+#### Storing the key (recommended: a secret manager)
+
+An exported `OPENAI_API_KEY` sits in your session environment, where **every
+process you run can read it** (via `/proc/PID/environ`) — `chmod 600` on the
+file only stops *other users*, not your own apps. Prefer keeping the key in a
+secret store and letting whisper-dictation fetch it at transcription time.
+
+**KWallet / libsecret (KDE-native, no env var).** Store the key once, then
+put nothing in `whisper.conf` except the backend:
+
+```sh
+# store (prompts for the key; --label is cosmetic)
+secret-tool store --label='OpenAI API key' service openai-api-key
+# whisper.conf then only needs:  WHISPER_BACKEND=cloud
+```
+
+whisper-toggle runs `secret-tool lookup service openai-api-key` and KWallet
+unlocks it for the session. Using a different attribute set? Point
+`WHISPER_SECRET_TOOL_ATTRS` at it (must match your `secret-tool store`).
+
+**Password manager (`pass`, gopass, 1Password CLI, …).** Set a command that
+prints the key:
+
+```ini
+WHISPER_BACKEND=cloud
+OPENAI_API_KEY_CMD=pass show openai/api
+```
+
+**Plaintext env var.** `OPENAI_API_KEY=sk-...` still works and takes priority
+— fine for a quick terminal test, not recommended for the persistent hotkey.
+
 ### Model sizes (approximate, English)
 
 | Model     | Size   | RAM    | Relative speed | Accuracy   |
@@ -166,7 +203,7 @@ apart at a glance:
 |----------------------------------|------------------------------------------------|
 | `⚫ No speech detected`           | Transcription ran but produced no text          |
 | `⚫ Too little audio`             | You toggled off almost immediately              |
-| `⚠ No OpenAI API key set`        | `WHISPER_BACKEND=cloud` but no `OPENAI_API_KEY` |
+| `⚠ No OpenAI API key found`      | Cloud backend, but no key from env / cmd / secret-tool |
 | `⚠ Invalid OpenAI API key`       | Key rejected (401)                              |
 | `⚠ Unknown model: …`             | `OPENAI_TRANSCRIBE_MODEL` not recognized        |
 | `⚠ OpenAI quota exceeded`        | Billing/quota exhausted                         |
