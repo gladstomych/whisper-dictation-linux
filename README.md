@@ -60,11 +60,12 @@ which the KDE shortcut doesn't see.
 ### Switching backends
 
 ```sh
-./setup.sh backend local     # offline Whisper
-./setup.sh backend cloud     # OpenAI
+./setup.sh backend local              # offline Whisper
+./setup.sh backend cloud              # OpenAI
+./setup.sh model whisper-1            # pick the cloud model (see below)
 ```
 
-This sets `WHISPER_BACKEND` in `whisper.conf` (preserving your key config).
+`backend` sets `WHISPER_BACKEND` and `model` sets `OPENAI_TRANSCRIBE_MODEL` in `whisper.conf` (preserving your key config).
 **Log out and back in** for the hotkey to pick it up. To test in a terminal
 without logging out, set it in the shell — but for *both* toggle presses,
 since the second (stop) press is what transcribes:

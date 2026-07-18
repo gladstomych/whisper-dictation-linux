@@ -6,6 +6,7 @@
 #   ./setup.sh install --cloud   # install, OpenAI cloud backend
 #   ./setup.sh backend local     # switch the hotkey to the local backend
 #   ./setup.sh backend cloud     # switch the hotkey to the cloud backend
+#   ./setup.sh model whisper-1   # set the cloud transcription model
 #   ./setup.sh set-key           # store your OpenAI key in KWallet (secret-tool)
 #   ./setup.sh uninstall         # undo everything this script installed
 #
@@ -256,7 +257,7 @@ OPENAI_API_KEY=
 #   3. secret-tool (KWallet). Leave OPENAI_API_KEY empty and run once:
 #        secret-tool store --label='OpenAI API key' service openai-api-key
 # Optional overrides:
-# OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
+# OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 # WHISPER_HTTP_RETRIES=2
 EOF
     chmod 600 "$ENVD_CONF"
@@ -265,25 +266,25 @@ EOF
   fi
 }
 
-conf_set_backend() {
-  # Idempotently set WHISPER_BACKEND=<value> in the env.d file, preserving any
-  # other lines (key config, model overrides). Creates the file if absent.
-  local value="$1"
+conf_set_var() {
+  # Idempotently set KEY=VALUE in the env.d file, preserving all other lines
+  # (backend, key config, model). Creates the file if absent. chmod 600.
+  local key="$1" value="$2"
   mkdir -p "$(dirname -- "$ENVD_CONF")"
   if [[ -f "$ENVD_CONF" ]]; then
     local tmp="${ENVD_CONF}.tmp"
-    grep -v '^[[:space:]]*WHISPER_BACKEND=' "$ENVD_CONF" > "$tmp" || true
-    printf 'WHISPER_BACKEND=%s\n' "$value" >> "$tmp"
+    grep -v "^[[:space:]]*${key}=" "$ENVD_CONF" > "$tmp" || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
     mv "$tmp" "$ENVD_CONF"
   else
-    cat > "$ENVD_CONF" <<EOF
-# whisper-dictation backend selection (loaded into the session at login).
-WHISPER_BACKEND=${value}
-EOF
+    printf '# whisper-dictation config (loaded into the session at login).\n%s=%s\n' \
+      "$key" "$value" > "$ENVD_CONF"
     mark_state "cloud:envd"
   fi
   chmod 600 "$ENVD_CONF"
 }
+
+conf_set_backend() { conf_set_var WHISPER_BACKEND "$1"; }
 
 cmd_backend() {
   local value="${1:-}"
@@ -302,6 +303,22 @@ cmd_backend() {
       warn "(or set OPENAI_API_KEY / OPENAI_API_KEY_CMD in ${ENVD_CONF})"
     fi
   fi
+  warn "Log out and back in for the KDE hotkey to pick up the change."
+}
+
+cmd_model() {
+  # Set the cloud transcription model (OPENAI_TRANSCRIBE_MODEL) in env.d.
+  local m="${1:-}"
+  [[ -n "$m" ]] || die "usage: $0 model <gpt-4o-mini-transcribe|whisper-1|gpt-4o-transcribe>"
+  case "$m" in
+    gpt-4o-mini-transcribe | whisper-1) ;;  # recommended: no tail-drop
+    gpt-4o-transcribe)
+      warn "gpt-4o-transcribe drops the last words of short clips;"
+      warn "gpt-4o-mini-transcribe or whisper-1 are more reliable for dictation." ;;
+    *) warn "Unrecognized model '${m}' — writing it anyway (custom/compatible endpoint?)." ;;
+  esac
+  conf_set_var OPENAI_TRANSCRIBE_MODEL "$m"
+  info "Cloud transcription model set to '${m}' in ${ENVD_CONF}"
   warn "Log out and back in for the KDE hotkey to pick up the change."
 }
 
@@ -543,6 +560,9 @@ Usage: $0 <command>
                      Switch the backend for the KDE hotkey by setting
                      WHISPER_BACKEND in ${ENVD_CONF}
                      (takes effect after the next log out / back in).
+  model <name>       Set the cloud transcription model (OPENAI_TRANSCRIBE_MODEL):
+                     gpt-4o-mini-transcribe (default) | whisper-1 |
+                     gpt-4o-transcribe (drops tail words — not recommended).
   set-key            Store your OpenAI API key in KWallet (via secret-tool),
                      so the cloud backend needs no plaintext key anywhere.
   uninstall          Undo everything this script installed.
@@ -572,6 +592,7 @@ case "$cmd" in
     install
     ;;
   backend)   cmd_backend "${1:-}" ;;
+  model)     cmd_model "${1:-}" ;;
   set-key)   cmd_set_key ;;
   uninstall) uninstall ;;
   *) usage; exit 1 ;;
