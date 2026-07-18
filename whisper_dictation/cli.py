@@ -33,6 +33,27 @@ import sys
 import time
 from pathlib import Path
 
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int-valued env var, falling back to ``default`` on junk.
+
+    These are parsed at import time, so a bad value must NOT raise: the KDE
+    shortcut runs whisper-toggle with no terminal, and a ValueError here would
+    abort before any OSD, leaving the toggle silently dead on both press and
+    release.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        sys.stderr.write(
+            f"whisper-toggle: {name}={raw!r} is not an integer; using {default}\n"
+        )
+        return default
+
+
 _TMP = os.environ.get("TMPDIR", "/tmp")
 COOKIE_PATH = Path(os.environ.get("WHISPER_COOKIE", os.path.join(_TMP, "whisper-dictation.cookie")))
 AUDIO_PATH = Path(os.environ.get("WHISPER_AUDIO", os.path.join(_TMP, "whisper-dictation-audio.raw")))
@@ -44,7 +65,13 @@ DEFAULT_LANG = os.environ.get("WHISPER_LANG", "en")
 
 OPENAI_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-HTTP_TIMEOUT = int(os.environ.get("WHISPER_HTTP_TIMEOUT", "300"))
+HTTP_TIMEOUT = _env_int("WHISPER_HTTP_TIMEOUT", 300)
+
+# Transient failures (429 rate-limit, 5xx server) are retried a few times
+# before giving up, since the captured audio is discarded after the toggle
+# and the user would otherwise have to re-record from scratch.
+HTTP_MAX_ATTEMPTS = max(1, _env_int("WHISPER_HTTP_RETRIES", 2) + 1)
+HTTP_RETRY_BACKOFF_S = 1.5
 
 # OpenAI's hard upload limit is 25 MB. Over it, the endpoint does NOT reject
 # the request — it returns 200 with a silently truncated transcript — so we
@@ -63,7 +90,7 @@ CHANNELS = 1
 # parec's default buffer delays the first samples by ~2s, which silently
 # eats the start of every recording (you start talking before capture is
 # actually flowing). A low target latency makes it stream near-immediately.
-PAREC_LATENCY_MS = int(os.environ.get("WHISPER_PAREC_LATENCY_MS", "30"))
+PAREC_LATENCY_MS = _env_int("WHISPER_PAREC_LATENCY_MS", 30)
 
 
 class TranscriptionError(Exception):
@@ -265,25 +292,41 @@ def _transcribe_cloud(pcm) -> str:
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            # response_format=text returns the transcript as the raw body.
-            return resp.read().decode("utf-8").strip()
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace").strip()
-        osd_msg, detail = _openai_http_error(exc.code, body)
-        raise TranscriptionError(osd_msg, f"OpenAI API {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        reason = exc.reason
-        if isinstance(reason, TimeoutError):
+    for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                # response_format=text returns the transcript as the raw body.
+                return resp.read().decode("utf-8").strip()
+        except urllib.error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", "replace").strip()
+            # 429 (rate limit) and 5xx (server) are transient — retry with a
+            # short backoff before surfacing. Everything else is terminal.
+            transient = exc.code == 429 or 500 <= exc.code < 600
+            if transient and attempt < HTTP_MAX_ATTEMPTS:
+                sys.stderr.write(
+                    f"whisper-toggle: OpenAI {exc.code}, retry "
+                    f"{attempt}/{HTTP_MAX_ATTEMPTS - 1}\n"
+                )
+                time.sleep(HTTP_RETRY_BACKOFF_S * attempt)
+                continue
+            osd_msg, detail = _openai_http_error(exc.code, err_body)
             raise TranscriptionError(
-                "⚠ OpenAI request timed out", str(reason)
+                osd_msg, f"OpenAI API {exc.code}: {detail}"
             ) from exc
-        raise TranscriptionError(
-            "⚠ Cannot reach OpenAI (network?)", str(reason)
-        ) from exc
-    except TimeoutError as exc:  # bare socket timeout on some Python builds
-        raise TranscriptionError("⚠ OpenAI request timed out", str(exc)) from exc
+        except urllib.error.URLError as exc:
+            reason = exc.reason
+            if isinstance(reason, TimeoutError):
+                raise TranscriptionError(
+                    "⚠ OpenAI request timed out", str(reason)
+                ) from exc
+            raise TranscriptionError(
+                "⚠ Cannot reach OpenAI (network?)", str(reason)
+            ) from exc
+        except TimeoutError as exc:  # bare socket timeout on some Python builds
+            raise TranscriptionError("⚠ OpenAI request timed out", str(exc)) from exc
+
+    # Unreachable: the loop either returns or raises on the final attempt.
+    raise TranscriptionError("⚠ OpenAI request failed", "exhausted retries")
 
 
 def _openai_http_error(code: int, body: str) -> tuple[str, str]:

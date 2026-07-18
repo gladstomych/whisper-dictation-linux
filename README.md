@@ -36,7 +36,9 @@ Not supported:
 ```sh
 git clone <this repo> ~/dev/whisper-dictation
 cd ~/dev/whisper-dictation
-./install.sh install
+./install.sh install            # local, offline backend (default)
+# or, for OpenAI cloud transcription:
+./install.sh install --cloud    # skips the local model; see "Cloud backend" below
 ```
 
 Then log out + back in (so the `input` group applies) and bind a KDE
@@ -79,6 +81,12 @@ Environment variables (set in your shell or the systemd unit):
 
 `WHISPER_MODEL`/`WHISPER_DEVICE` apply to the `local` backend only.
 
+> **Privacy note:** `WHISPER_DEBUG=1` archives every session's raw audio
+> (`.wav`) and transcript (`.txt`) under `WHISPER_DEBUG_DIR`
+> (`~/.cache/whisper-dictation` by default) and never prunes them — the
+> recordings accumulate until you delete them. Leave it off for normal use;
+> when done debugging, clear the directory (`rm -rf ~/.cache/whisper-dictation`).
+
 ### Cloud backend (OpenAI)
 
 Set `WHISPER_BACKEND=cloud` to transcribe with OpenAI's hosted models
@@ -93,6 +101,7 @@ backend stays the default; cloud is fully opt-in.
 | `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | `gpt-4o-transcribe` `gpt-4o-mini-transcribe` `whisper-1` |
 | `OPENAI_BASE_URL`         | `https://api.openai.com/v1` | For proxies / compatible endpoints |
 | `WHISPER_HTTP_TIMEOUT`    | `300`               | API request timeout, seconds              |
+| `WHISPER_HTTP_RETRIES`    | `2`                 | Retries on transient 429 / 5xx before giving up |
 
 **Length limit:** OpenAI caps uploads at 25 MB. Since audio is sent as
 uncompressed 16 kHz mono WAV (~1.9 MB/min), that's about **13 minutes** per
@@ -107,9 +116,15 @@ cheaper and slightly less accurate; `whisper-1` is the original API model.
 No extra Python dependencies are needed — the cloud path uses only the
 standard library.
 
-Because the KDE global shortcut runs `whisper-toggle` with the session
-environment (not your interactive shell), export the key where that
-environment is set — e.g. add to `~/.config/environment.d/whisper.conf`:
+The quickest setup is `./install.sh install --cloud`, which skips the
+local model download and writes `~/.config/environment.d/whisper.conf`
+(`chmod 600`) with `WHISPER_BACKEND=cloud` and an empty `OPENAI_API_KEY=`
+for you to fill in — then log out and back in.
+
+To do it by hand: because the KDE global shortcut runs `whisper-toggle`
+with the session environment (not your interactive shell), export the key
+where that environment is set — e.g. add to
+`~/.config/environment.d/whisper.conf`:
 
 ```ini
 WHISPER_BACKEND=cloud
@@ -118,6 +133,14 @@ OPENAI_API_KEY=sk-...
 
 then log out and back in. (Testing from a terminal, a normal `export`
 in your shell is enough.)
+
+Because this file holds your API key, make it owner-only:
+
+```sh
+chmod 600 ~/.config/environment.d/whisper.conf
+```
+
+The same applies to any `.env` you keep in the repo — `chmod 600 .env`.
 
 ### Model sizes (approximate, English)
 

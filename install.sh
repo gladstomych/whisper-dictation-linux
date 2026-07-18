@@ -2,8 +2,14 @@
 #
 # whisper-dictation installer for KDE Plasma on Wayland.
 #
-#   ./install.sh install     # install everything
-#   ./install.sh uninstall   # undo everything this script installed
+#   ./install.sh install           # install, local (offline) backend
+#   ./install.sh install --cloud   # install, OpenAI cloud backend
+#   ./install.sh uninstall         # undo everything this script installed
+#
+# The --cloud flag configures the OpenAI backend instead of the local one:
+# it writes ~/.config/environment.d/whisper.conf (WHISPER_BACKEND=cloud plus
+# a placeholder for your key, chmod 600) and skips the local Whisper model
+# entirely (no ~460 MB download — transcription happens on OpenAI's servers).
 #
 # Supported distros: any with dnf (Fedora) or apt (Debian/Ubuntu).
 # Supported session: KDE Plasma on Wayland. The script will warn (but not
@@ -30,6 +36,11 @@ REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_BIN="${HOME}/.local/bin"
 STATE_DIR="${HOME}/.local/state/whisper-dictation-setup"
 STATE_FILE="${STATE_DIR}/installed"
+
+# Backend for this install: "local" (offline Whisper) or "cloud" (OpenAI).
+# Set by the --cloud flag; drives whether we set up env.d + skip the model.
+BACKEND="local"
+ENVD_CONF="${HOME}/.config/environment.d/whisper.conf"
 
 # ---------- helpers ----------
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
@@ -221,8 +232,33 @@ EOF
   mark_state "service:user"
 }
 
+setup_cloud_env() {
+  # Configure the OpenAI cloud backend via environment.d, which is loaded into
+  # the systemd user session — so the KDE global shortcut (which does NOT see
+  # your interactive shell) picks it up. We never write a real key: the file is
+  # created with an empty placeholder for the user to fill in, chmod 600.
+  info "Configuring cloud backend (env.d: ${ENVD_CONF})"
+  mkdir -p "$(dirname -- "$ENVD_CONF")"
+  if [[ -f "$ENVD_CONF" ]]; then
+    warn "${ENVD_CONF} already exists — leaving it untouched."
+    warn "Ensure it contains: WHISPER_BACKEND=cloud and OPENAI_API_KEY=sk-..."
+  else
+    cat > "$ENVD_CONF" <<'EOF'
+# whisper-dictation cloud backend (OpenAI). Fill in your key below.
+WHISPER_BACKEND=cloud
+OPENAI_API_KEY=
+# Optional overrides:
+# OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
+# WHISPER_HTTP_RETRIES=2
+EOF
+    chmod 600 "$ENVD_CONF"
+    mark_state "cloud:envd"
+    info "Wrote ${ENVD_CONF} (chmod 600). Add your OPENAI_API_KEY there."
+  fi
+}
+
 install() {
-  info "Installing whisper-dictation stack"
+  info "Installing whisper-dictation stack (backend: ${BACKEND})"
   check_session_scope
   detect_pkg_mgr
   if [[ "$PKG_MGR" == "none" ]]; then
@@ -236,24 +272,54 @@ install() {
   install_udev_rule
   add_user_to_input_group
   enable_ydotoold
+  if [[ "$BACKEND" == "cloud" ]]; then
+    setup_cloud_env
+  fi
+
+  # The model/key line and one manual step differ per backend.
+  local model_line step_key
+  if [[ "$BACKEND" == "cloud" ]]; then
+    model_line='Cloud (OpenAI) backend configured — no local model is downloaded.
+Transcription runs on OpenAI'\''s servers; your audio leaves the machine.'
+    step_key="  1. Add your OpenAI API key to:
+         ${ENVD_CONF}
+     Set the OPENAI_API_KEY= line (get a key at platform.openai.com).
+  2. Log out + back in (or reboot) — for the input-group change AND so the
+     session picks up ${ENVD_CONF}."
+  else
+    model_line='The Whisper "small" model (~460 MB) will be downloaded
+automatically on your first toggle-off transcription.'
+    step_key="  1. Log out + back in (or reboot) for the input-group change."
+  fi
 
   cat >&2 <<EOF
 
 ------------------------------------------------------------
-Install complete. The Whisper "small" model (~460 MB) will be
-downloaded automatically on your first toggle-off transcription.
+Install complete. ${model_line}
 
 Remaining MANUAL steps:
 
-  1. Log out + back in (or reboot) for the input-group change.
-  2. Verify ydotool:  focus a text field, then run
+${step_key}
+  3. Verify ydotool:  focus a text field, then run
          ydotool type "hello"
      "hello" should appear in the focused window.
-  3. Smoke test whisper-toggle:
+  4. Smoke test whisper-toggle:
          whisper-toggle   # press → speak → press again
-  4. Bind a KDE global shortcut to:
+  5. Bind a KDE global shortcut to:
          ${LOCAL_BIN}/whisper-toggle
      (System Settings > Keyboard > Shortcuts > Custom > Command/URL)
+EOF
+
+  if [[ "$BACKEND" != "cloud" ]]; then
+    cat >&2 <<EOF
+
+Want cloud (OpenAI) transcription instead? Re-run:
+    $0 install --cloud
+or see README.md § "Cloud backend (OpenAI)".
+EOF
+  fi
+
+  cat >&2 <<EOF
 
 State recorded in: ${STATE_FILE}
 To undo everything:  $0 uninstall
@@ -375,6 +441,8 @@ uninstall() {
   uninstall_ydotool
   uninstall_uv
   cleanup_caches
+  # Drop the state marker but never auto-delete the key file (see summary).
+  unmark_state "cloud:envd"
 
   rm -f /tmp/whisper-dictation.cookie /tmp/whisper-dictation-audio.raw 2>/dev/null || true
 
@@ -391,7 +459,9 @@ Uninstall complete. Remaining MANUAL steps:
   - Remove the KDE shortcut you bound to whisper-toggle
     (System Settings > Shortcuts > Custom).
   - Log out + back in for the input-group removal to apply.
-
+$(if has_state "cloud:envd" || [[ -f "$ENVD_CONF" ]]; then
+    printf '  - Cloud key file left in place (may hold your API key):\n        %s\n    Delete it yourself if you no longer need it.\n' "$ENVD_CONF"
+  fi)
 To reinstall later:  $0 install
 ------------------------------------------------------------
 EOF
@@ -399,21 +469,42 @@ EOF
 
 # ---------- main ----------
 
-case "${1:-}" in
-  install)   install ;;
-  uninstall) uninstall ;;
-  *) cat >&2 <<EOF
-Usage: $0 {install|uninstall}
+usage() {
+  cat >&2 <<EOF
+Usage: $0 install [--cloud]
+       $0 uninstall
 
-The Whisper model (default: small, ~460 MB) is downloaded on first
-transcription, not during install. To pre-warm:
+  install            Local (offline) backend. The Whisper model (default:
+                     small, ~460 MB) downloads on first transcription.
+  install --cloud    OpenAI cloud backend. No local model; writes
+                     ${ENVD_CONF}
+                     for you to add OPENAI_API_KEY.
+  uninstall          Undo everything this script installed.
+
+To pre-warm the local model:
 
   uv run --with faster-whisper python -c \\
     "from faster_whisper import WhisperModel; \\
      WhisperModel('small', device='cpu', compute_type='int8')"
 
-To use a different model, set WHISPER_MODEL in the environment
+To use a different local model, set WHISPER_MODEL in the environment
 before invoking whisper-toggle (tiny/base/small/medium/large-v3).
 EOF
-     exit 1 ;;
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  install)
+    for arg in "$@"; do
+      case "$arg" in
+        --cloud) BACKEND="cloud" ;;
+        --local) BACKEND="local" ;;
+        *) err "unknown option: ${arg}"; usage; exit 1 ;;
+      esac
+    done
+    install
+    ;;
+  uninstall) uninstall ;;
+  *) usage; exit 1 ;;
 esac
