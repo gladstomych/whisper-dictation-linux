@@ -16,8 +16,11 @@ Configuration via environment variables:
   WHISPER_DEBUG_DIR        where debug artifacts go        (default: ~/.cache/whisper-dictation)
 
 Cloud backend (WHISPER_BACKEND=cloud) uses the OpenAI transcription API:
-  OPENAI_TRANSCRIBE_MODEL  gpt-4o-transcribe | gpt-4o-mini-transcribe | whisper-1
-                                                           (default: gpt-4o-transcribe)
+  OPENAI_TRANSCRIBE_MODEL  gpt-4o-mini-transcribe | gpt-4o-transcribe | whisper-1
+                                             (default: gpt-4o-mini-transcribe;
+                                              plain gpt-4o-transcribe truncates
+                                              short clips — avoid it)
+  OPENAI_TRANSCRIBE_PROMPT verbatim/anti-omission prompt   (default: set; "" to disable)
   OPENAI_BASE_URL          override API base URL           (default: https://api.openai.com/v1)
   WHISPER_HTTP_TIMEOUT     API request timeout, seconds    (default: 300)
   WHISPER_HTTP_RETRIES     retries on transient 429/5xx    (default: 2)
@@ -78,9 +81,22 @@ DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
 DEFAULT_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
 DEFAULT_LANG = os.environ.get("WHISPER_LANG", "en")
 
-OPENAI_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+# gpt-4o-transcribe reliably truncates short/abrupt clips (drops the final
+# words) — a widely reported, unfixed defect. gpt-4o-mini-transcribe does not,
+# so it's the default; whisper-1 is the most truncation-resistant fallback.
+OPENAI_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 HTTP_TIMEOUT = _env_int("WHISPER_HTTP_TIMEOUT", 300)
+
+# Verbatim prompt + temperature 0 fight the gpt-4o-family tendency to omit or
+# "clean up" words, and steer whisper-1 away from silence hallucinations. Kept
+# short and non-echoing on near-silent audio (verified). Override or clear it
+# with OPENAI_TRANSCRIBE_PROMPT.
+OPENAI_PROMPT = os.environ.get(
+    "OPENAI_TRANSCRIBE_PROMPT",
+    "Transcribe the audio verbatim. Output every word exactly as spoken; "
+    "do not omit, summarize, translate, or add anything.",
+)
 
 # API-key resolution. Prefer a secret manager over a plaintext env var: an
 # exported key lives in the session environment, readable by every process
@@ -401,7 +417,14 @@ def _transcribe_cloud(pcm) -> str:
 
     # Build a multipart/form-data body by hand to avoid pulling in the openai SDK.
     boundary = f"----whisper-dictation-{uuid.uuid4().hex}"
-    fields = {"model": OPENAI_MODEL, "language": DEFAULT_LANG, "response_format": "text"}
+    fields = {
+        "model": OPENAI_MODEL,
+        "language": DEFAULT_LANG,
+        "response_format": "text",
+        "temperature": "0",
+    }
+    if OPENAI_PROMPT:
+        fields["prompt"] = OPENAI_PROMPT
 
     parts: list[bytes] = []
     for name, value in fields.items():

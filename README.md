@@ -80,7 +80,8 @@ latency, per-request billing, and sending your audio off the machine.
 
 | Variable                  | Default             | Notes                          |
 |---------------------------|---------------------|--------------------------------|
-| `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | also `gpt-4o-mini-transcribe`, `whisper-1` |
+| `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-mini-transcribe` | also `whisper-1`; **avoid** plain `gpt-4o-transcribe` (see below) |
+| `OPENAI_TRANSCRIBE_PROMPT`| *(verbatim prompt)* | Anti-omission steer; set `""` to disable |
 | `OPENAI_BASE_URL`         | `https://api.openai.com/v1` | For proxies / compatible endpoints |
 | `WHISPER_HTTP_TIMEOUT`    | `300`               | Request timeout, seconds       |
 | `WHISPER_HTTP_RETRIES`    | `2`                 | Retries on transient 429 / 5xx |
@@ -88,6 +89,13 @@ latency, per-request billing, and sending your audio off the machine.
 The cloud path uses only the standard library — no extra dependencies.
 Uploads are capped at 25 MB (~13 min of audio); over that OpenAI silently
 truncates, so whisper-dictation refuses and shows `⚠ Recording too long`.
+
+> **Model choice matters.** Plain `gpt-4o-transcribe` reliably *drops the last
+> words* of short/abrupt clips — a widely reported, unfixed defect — which is
+> exactly the shape of dictation. The default is `gpt-4o-mini-transcribe`
+> (complete and cheaper here); `whisper-1` is the most truncation-resistant
+> fallback. A verbatim prompt + `temperature=0` are sent to further discourage
+> omission and silence hallucinations.
 
 **API key.** Resolved at transcription time, first match wins:
 
