@@ -64,6 +64,14 @@ def _env_int(name: str, default: int) -> int:
 _TMP = os.environ.get("TMPDIR", "/tmp")
 COOKIE_PATH = Path(os.environ.get("WHISPER_COOKIE", os.path.join(_TMP, "whisper-dictation.cookie")))
 AUDIO_PATH = Path(os.environ.get("WHISPER_AUDIO", os.path.join(_TMP, "whisper-dictation-audio.raw")))
+# PID of the background OSD "keep-alive" process (see _spawn_osd_daemon). Held
+# in a file because recording and transcription are separate invocations.
+INDICATOR_PATH = Path(os.path.join(_TMP, "whisper-dictation-indicator.pid"))
+
+# The KDE OSD auto-fades after ~2s, so a single showText leaves no indication
+# that recording/transcription is still going. A background process re-shows it
+# on this interval to keep it pinned until we kill it.
+OSD_REFRESH_S = 1.0
 
 DEFAULT_BACKEND = os.environ.get("WHISPER_BACKEND", "local")
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
@@ -159,6 +167,54 @@ def osd(icon: str, text: str) -> None:
         pass
 
 
+def _osd_daemon(icon: str, text: str) -> None:
+    """Re-show one OSD line forever, so it stays pinned until we're killed.
+
+    Runs as a detached child (see _spawn_osd_daemon). Exits cleanly on SIGTERM;
+    exits immediately off KDE, where there is no OSD to keep alive.
+    """
+    if _find_qdbus() is None:
+        return
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    while True:
+        osd(icon, text)
+        time.sleep(OSD_REFRESH_S)
+
+
+def _spawn_osd_daemon(icon: str, text: str) -> None:
+    """Start a detached OSD keep-alive process; record its PID for later kill.
+
+    Replaces any indicator already running (e.g. switching the recording
+    indicator to the transcribing one).
+    """
+    stop_osd_daemon()  # never leave two running
+    osd(icon, text)  # show once immediately; the daemon then keeps it alive
+    try:
+        proc = subprocess.Popen(
+            [sys.argv[0], "--osd-daemon", icon, text],
+            start_new_session=True,  # detach: survives this process exiting
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        sys.stderr.write(f"whisper-toggle: could not start OSD indicator: {exc}\n")
+        return
+    INDICATOR_PATH.write_text(str(proc.pid))
+
+
+def stop_osd_daemon() -> None:
+    """Kill the OSD keep-alive process if one is recorded. Idempotent."""
+    try:
+        pid = int(INDICATOR_PATH.read_text().strip())
+    except (OSError, ValueError):
+        return
+    INDICATOR_PATH.unlink(missing_ok=True)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def read_cookie_pid() -> int | None:
     if not COOKIE_PATH.exists():
         return None
@@ -186,7 +242,8 @@ def start_recording() -> int:
     AUDIO_PATH.unlink(missing_ok=True)
     COOKIE_PATH.unlink(missing_ok=True)
 
-    osd("microphone-sensitivity-high", "🔴 Whisper ON")
+    # Pinned indicator, kept on screen until transcription finishes.
+    _spawn_osd_daemon("microphone-sensitivity-high", "🔴 Whisper recording…")
 
     out = open(AUDIO_PATH, "wb")  # noqa: SIM115 - we want a raw FD for the child
     try:
@@ -511,30 +568,44 @@ def stop_recording_and_transcribe() -> None:
         return
 
     stop_recorder(pid)
-    osd("media-playback-stop", "⚫ Whisper OFF · transcribing…")
+    # Keep the indicator pinned — now as "transcribing" — through the model/API
+    # call, which is the part with no other sign it's still working.
+    _spawn_osd_daemon("media-playback-stop", "⏳ Whisper transcribing…")
 
+    failure: tuple[str, str] | None = None
     try:
         transcribe_and_type()
     except TranscriptionError as exc:
         # Known failure with a user-facing message; detail goes to stderr.
         sys.stderr.write(f"whisper-toggle: {exc}\n")
-        osd(exc.icon, exc.osd)
-        return
+        failure = (exc.icon, exc.osd)
     except Exception as exc:  # noqa: BLE001 - surface failure via OSD, not a crash
         sys.stderr.write(f"whisper-toggle: transcription failed: {exc}\n")
-        osd("dialog-error", "⚠ Whisper failed")
-        return
+        failure = ("dialog-error", "⚠ Whisper failed")
     finally:
         AUDIO_PATH.unlink(missing_ok=True)
+        stop_osd_daemon()  # kill the indicator before any final one-shot OSD
 
-    time.sleep(1.2)  # let the "transcribing" OSD be readable
+    if failure is not None:
+        osd(*failure)
+        return
+
     osd("media-playback-stop", "⚫ Whisper done")
 
 
 def main() -> int:
-    argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="Toggle Whisper-based dictation on/off.",
-    ).parse_args()
+    )
+    # Internal: run the OSD keep-alive loop (spawned by _spawn_osd_daemon).
+    parser.add_argument(
+        "--osd-daemon", nargs=2, metavar=("ICON", "TEXT"), help=argparse.SUPPRESS
+    )
+    args = parser.parse_args()
+
+    if args.osd_daemon:
+        _osd_daemon(args.osd_daemon[0], args.osd_daemon[1])
+        return 0
 
     if is_running():
         stop_recording_and_transcribe()

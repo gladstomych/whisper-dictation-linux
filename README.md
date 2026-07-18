@@ -2,34 +2,19 @@
 
 Offline Whisper-based dictation for KDE Plasma on Wayland.
 
-Press a hotkey to start recording. Speak. Press the hotkey again and
-Whisper transcribes what you said, then types the result into whatever
-window currently has keyboard focus — your terminal prompt, editor,
-chat input, browser bar, anything.
+Press a hotkey to start recording, speak, press it again — Whisper
+transcribes and types the text into whatever window has focus. Optionally
+uses OpenAI's hosted models instead of a local Whisper. Transcription is
+batch-mode: text appears after you stop speaking, not streamed live.
 
-## Why
+## Requirements
 
-We like Whisper's accuracy on natural, conversational speech, and it
-produces punctuated, capitalized text out of the box — no post-processing
-needed. The trade-off is batch-mode transcription: text is produced after
-you finish speaking, not streamed live as you talk.
-
-## Scope
-
-Supported:
-
-- **Session**: KDE Plasma on Wayland (OSD indicators are KDE-specific;
-  transcription itself works on any desktop that has `ydotool`/`parec`).
-- **Distros**: Fedora (`dnf`), Debian/Ubuntu (`apt`). The installer
-  auto-detects; on other distros install `ydotool` and `pipewire-pulse`
-  manually first.
-
-Not supported:
-
-- **X11**: not tested. `ydotool` works there in principle, but `wtype`
-  or `xdotool` are typically more appropriate.
-- **GNOME/other compositors**: transcription works; OSD is silently
-  skipped (not an error). Add a `gdbus`/`notify-send` wrapper if needed.
+- **KDE Plasma on Wayland.** The on-screen indicators are KDE-specific;
+  transcription and typing work on any desktop with `ydotool` + `parec`
+  (the OSD is silently skipped elsewhere).
+- **Fedora (`dnf`) or Debian/Ubuntu (`apt`)** for the auto-installer. On
+  other distros, install `ydotool` and `pipewire-pulse` yourself first.
+- X11 is untested (`ydotool` works there, but `wtype`/`xdotool` fit better).
 
 ## Install
 
@@ -37,258 +22,138 @@ Not supported:
 git clone <this repo> ~/dev/whisper-dictation
 cd ~/dev/whisper-dictation
 ./setup.sh install            # local, offline backend (default)
-# or, for OpenAI cloud transcription:
-./setup.sh install --cloud    # skips the local model; see "Cloud backend" below
+./setup.sh install --cloud    # OpenAI backend instead (no local model)
 ```
 
-Then log out + back in (so the `input` group applies) and bind a KDE
-global shortcut to:
+Then **log out and back in** (for the `input` group), and bind a KDE global
+shortcut (System Settings → Keyboard → Shortcuts → Custom → Command/URL) to:
 
 ```
 ~/.local/bin/whisper-toggle
 ```
 
-(System Settings → Keyboard → Shortcuts → Custom → Command/URL.)
-
 ## Use
 
-1. Focus any text field — a terminal prompt, an editor, a chat input,
-   a browser URL bar, anything that accepts typed input.
-2. Press your hotkey. A 🔴 OSD appears and audio recording starts.
-3. Speak naturally.
-4. Press the hotkey again. Recording stops, Whisper transcribes the
-   audio, and the resulting text is typed into your focused input
-   buffer — exactly as if you had typed it yourself.
-
-Typical latency from "second hotkey press" to "text appears" is 1–3
-seconds on a modern CPU with the default `small` model.
+Focus a text field, press your hotkey (a 🔴 indicator stays on screen while
+recording), speak, then press it again. The indicator switches to ⏳ while
+transcribing and the text is typed into the focused window. Typical latency
+is 1–3 s on a modern CPU with the default `small` model.
 
 ## Configuration
 
-Environment variables (set in your shell or the systemd unit):
+All configuration is via environment variables. For the hotkey, set them in
+`~/.config/environment.d/whisper.conf` (read at login) — not your shell rc,
+which the KDE shortcut doesn't see.
 
 | Variable          | Default | Values                                   |
 |-------------------|---------|------------------------------------------|
 | `WHISPER_BACKEND` | `local` | `local` `cloud`                          |
-| `WHISPER_MODEL`   | `small` | `tiny` `base` `small` `medium` `large-v3`|
-| `WHISPER_DEVICE`  | `cpu`   | `cpu` `cuda`                             |
+| `WHISPER_MODEL`   | `small` | `tiny` `base` `small` `medium` `large-v3` (local only) |
+| `WHISPER_DEVICE`  | `cpu`   | `cpu` `cuda` (local only)                |
 | `WHISPER_LANG`    | `en`    | ISO 639-1 code                           |
-| `WHISPER_COOKIE`  | `/tmp/whisper-dictation.cookie` | Override cookie path        |
-| `WHISPER_AUDIO`   | `/tmp/whisper-dictation-audio.raw` | Override temp audio path  |
-| `WHISPER_DEBUG`   | *(off)* | `1` to archive each session's audio + transcript |
-| `WHISPER_DEBUG_DIR` | `~/.cache/whisper-dictation` | Where debug artifacts are written |
-| `WHISPER_PAREC_LATENCY_MS` | `30` | parec capture latency; low avoids losing the start of speech |
+| `WHISPER_DEBUG`   | *(off)* | `1` archives each session's audio + transcript |
+| `WHISPER_DEBUG_DIR` | `~/.cache/whisper-dictation` | Debug artifact directory |
 
-`WHISPER_MODEL`/`WHISPER_DEVICE` apply to the `local` backend only.
-
-> **Privacy note:** `WHISPER_DEBUG=1` archives every session's raw audio
-> (`.wav`) and transcript (`.txt`) under `WHISPER_DEBUG_DIR`
-> (`~/.cache/whisper-dictation` by default) and never prunes them — the
-> recordings accumulate until you delete them. Leave it off for normal use;
-> when done debugging, clear the directory (`rm -rf ~/.cache/whisper-dictation`).
+`WHISPER_DEBUG=1` writes a `.wav` + `.txt` per session and never prunes them
+— leave it off for normal use, and clear the directory when done.
 
 ### Switching backends
 
-`WHISPER_BACKEND` (`local` or `cloud`) picks the engine. The catch: the KDE
-hotkey runs `whisper-toggle` with the **session** environment, not your shell,
-so the switch must live in `~/.config/environment.d/whisper.conf` (read once at
-login) — not `.bashrc`/fish. Easiest is the helper:
-
 ```sh
 ./setup.sh backend local     # offline Whisper
-./setup.sh backend cloud      # OpenAI
+./setup.sh backend cloud     # OpenAI
 ```
 
-It sets `WHISPER_BACKEND` in `whisper.conf` (creating it, `chmod 600`,
-preserving your key config) and, for `cloud`, checks a key is reachable.
-**Log out and back in** for the hotkey to pick up the change.
-
-For a quick terminal test without logging out, set it in the shell instead —
-but set it for *both* toggle presses, since the **second** (stop) press is the
-one that transcribes:
+This sets `WHISPER_BACKEND` in `whisper.conf` (preserving your key config).
+**Log out and back in** for the hotkey to pick it up. To test in a terminal
+without logging out, set it in the shell — but for *both* toggle presses,
+since the second (stop) press is what transcribes:
 
 ```fish
-set -gx WHISPER_BACKEND cloud   # applies to whisper-toggle launched from this shell
+set -gx WHISPER_BACKEND cloud
 ```
 
 ### Cloud backend (OpenAI)
 
-Set `WHISPER_BACKEND=cloud` to transcribe with OpenAI's hosted models
-instead of a local Whisper. This is more accurate (especially on accents,
-noise, and proper nouns) at the cost of network latency and per-request
-billing — and, of course, your audio leaves the machine. The local
-backend stays the default; cloud is fully opt-in.
+More accurate on accents, noise, and proper nouns, at the cost of network
+latency, per-request billing, and sending your audio off the machine.
 
-| Variable                  | Default             | Notes                                     |
-|---------------------------|---------------------|-------------------------------------------|
-| `OPENAI_API_KEY`          | *(one of three)*    | Plaintext key. Simplest, least safe — see "Storing the key" |
-| `OPENAI_API_KEY_CMD`      | *(unset)*           | Command that prints the key, e.g. `pass show openai/api` |
-| `WHISPER_SECRET_TOOL_ATTRS` | `service openai-api-key` | Attributes `secret-tool` looks the key up under |
-| `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | `gpt-4o-transcribe` `gpt-4o-mini-transcribe` `whisper-1` |
+| Variable                  | Default             | Notes                          |
+|---------------------------|---------------------|--------------------------------|
+| `OPENAI_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | also `gpt-4o-mini-transcribe`, `whisper-1` |
 | `OPENAI_BASE_URL`         | `https://api.openai.com/v1` | For proxies / compatible endpoints |
-| `WHISPER_HTTP_TIMEOUT`    | `300`               | API request timeout, seconds              |
-| `WHISPER_HTTP_RETRIES`    | `2`                 | Retries on transient 429 / 5xx before giving up |
+| `WHISPER_HTTP_TIMEOUT`    | `300`               | Request timeout, seconds       |
+| `WHISPER_HTTP_RETRIES`    | `2`                 | Retries on transient 429 / 5xx |
 
-The key is resolved at transcription time, first match wins:
-**`OPENAI_API_KEY`** → **`OPENAI_API_KEY_CMD`** → **`secret-tool`** (libsecret /
-KWallet). At least one must yield a key.
+The cloud path uses only the standard library — no extra dependencies.
+Uploads are capped at 25 MB (~13 min of audio); over that OpenAI silently
+truncates, so whisper-dictation refuses and shows `⚠ Recording too long`.
 
-**Length limit:** OpenAI caps uploads at 25 MB. Since audio is sent as
-uncompressed 16 kHz mono WAV (~1.9 MB/min), that's about **13 minutes** per
-recording. Critically, the API does *not* reject an over-limit file — it
-returns a *silently truncated* transcript — so whisper-dictation checks the
-size itself and shows `⚠ Recording too long — split it` instead of letting
-you lose the tail. Keep individual dictations under ~13 min on the cloud
-backend.
+**API key.** Resolved at transcription time, first match wins:
 
-`gpt-4o-transcribe` is the most accurate; `gpt-4o-mini-transcribe` is
-cheaper and slightly less accurate; `whisper-1` is the original API model.
-No extra Python dependencies are needed — the cloud path uses only the
-standard library.
+1. `OPENAI_API_KEY` — plaintext env var. Readable by every process you run
+   (`/proc/PID/environ`), so fine for a terminal test, not the hotkey.
+2. `OPENAI_API_KEY_CMD` — a command that prints the key, e.g.
+   `OPENAI_API_KEY_CMD=pass show openai/api`.
+3. `secret-tool` (libsecret / KWallet) — the recommended default. Store once
+   and put nothing but `WHISPER_BACKEND=cloud` in `whisper.conf`:
 
-The quickest setup is `./setup.sh install --cloud`, which skips the
-local model download and writes `~/.config/environment.d/whisper.conf`
-(`chmod 600`) with `WHISPER_BACKEND=cloud` and an empty `OPENAI_API_KEY=`
-for you to fill in — then log out and back in.
+   ```sh
+   ./setup.sh set-key    # hidden prompt → stores the key in KWallet
+   ```
 
-To do it by hand: because the KDE global shortcut runs `whisper-toggle`
-with the session environment (not your interactive shell), export the key
-where that environment is set — e.g. add to
-`~/.config/environment.d/whisper.conf`:
+   Override the lookup attributes with `WHISPER_SECRET_TOOL_ATTRS` (default
+   `service openai-api-key`) if you stored it differently.
 
-```ini
-WHISPER_BACKEND=cloud
-OPENAI_API_KEY=sk-...
-```
+### Model sizes (local, approximate, English)
 
-then log out and back in. (Testing from a terminal, a normal `export`
-in your shell is enough.)
+| Model     | Size   | RAM    | Speed    | Accuracy   |
+|-----------|--------|--------|----------|------------|
+| `tiny`    | 39 M   | ~300 M | fastest  | low        |
+| `base`    | 74 M   | ~600 M | fast     | decent     |
+| `small`   | 244 M  | ~1.2 G | medium   | good       |
+| `medium`  | 769 M  | ~2.8 G | slow     | very good  |
+| `large-v3`| 1.5 B  | ~5 G   | slowest  | best       |
 
-Because this file holds your API key, make it owner-only:
+`base`/`small` are the CPU sweet spot; with `WHISPER_DEVICE=cuda` on an
+NVIDIA GPU you can run `medium`/`large-v3` in real time.
 
-```sh
-chmod 600 ~/.config/environment.d/whisper.conf
-```
+## Errors
 
-The same applies to any `.env` you keep in the repo — `chmod 600 .env`.
-
-#### Storing the key (recommended: a secret manager)
-
-An exported `OPENAI_API_KEY` sits in your session environment, where **every
-process you run can read it** (via `/proc/PID/environ`) — `chmod 600` on the
-file only stops *other users*, not your own apps. Prefer keeping the key in a
-secret store and letting whisper-dictation fetch it at transcription time.
-
-**KWallet / libsecret (KDE-native, no env var).** Store the key once, then
-put nothing in `whisper.conf` except the backend:
-
-```sh
-./setup.sh set-key    # prompts for the key (hidden), stores it in KWallet
-# whisper.conf then only needs:  WHISPER_BACKEND=cloud
-```
-
-That wraps `secret-tool store --label='OpenAI API key' service openai-api-key`
-(run it directly if you prefer). whisper-toggle then does
-`secret-tool lookup service openai-api-key` and KWallet unlocks it for the
-session. Using a different attribute set? Point `WHISPER_SECRET_TOOL_ATTRS`
-at it (must match how you stored the key).
-
-**Password manager (`pass`, gopass, 1Password CLI, …).** Set a command that
-prints the key:
-
-```ini
-WHISPER_BACKEND=cloud
-OPENAI_API_KEY_CMD=pass show openai/api
-```
-
-**Plaintext env var.** `OPENAI_API_KEY=sk-...` still works and takes priority
-— fine for a quick terminal test, not recommended for the persistent hotkey.
-
-### Model sizes (approximate, English)
-
-| Model     | Size   | RAM    | Relative speed | Accuracy   |
-|-----------|--------|--------|----------------|------------|
-| `tiny`    | 39 M   | ~300 M | fastest        | low        |
-| `base`    | 74 M   | ~600 M | fast           | decent     |
-| `small`   | 244 M  | ~1.2 G | medium         | good       |
-| `medium`  | 769 M  | ~2.8 G | slow           | very good  |
-| `large-v3`| 1.5 B  | ~5 G   | slowest        | best       |
-
-For CPU-only use, `base` or `small` is the sweet spot. If you have an
-NVIDIA GPU, set `WHISPER_DEVICE=cuda` and you can run `medium` or
-`large-v3` in real time.
-
-## Feedback & errors
-
-Because the hotkey runs `whisper-toggle` with no terminal, the KDE OSD is
-your only feedback. Failures show a specific message so you can tell them
-apart at a glance:
+The hotkey has no terminal, so failures surface as a specific OSD:
 
 | OSD                              | Meaning                                        |
 |----------------------------------|------------------------------------------------|
 | `⚫ No speech detected`           | Transcription ran but produced no text          |
-| `⚫ Too little audio`             | You toggled off almost immediately              |
-| `⚠ No OpenAI API key found`      | Cloud backend, but no key from env / cmd / secret-tool |
+| `⚫ Too little audio`             | Toggled off almost immediately                  |
+| `⚠ No OpenAI API key found`      | Cloud backend, no key from env / cmd / secret-tool |
 | `⚠ Invalid OpenAI API key`       | Key rejected (401)                              |
-| `⚠ Unknown model: …`             | `OPENAI_TRANSCRIBE_MODEL` not recognized        |
 | `⚠ OpenAI quota exceeded`        | Billing/quota exhausted                         |
-| `⚠ OpenAI rate limited — retry`  | Too many requests; try again                     |
+| `⚠ OpenAI rate limited — retry`  | Too many requests                               |
 | `⚠ Cannot reach OpenAI (network?)` | DNS/connection failure                        |
 | `⚠ Typing failed (is ydotoold running?)` | `ydotool` couldn't inject the text     |
 
-Full detail for any of these is written to stderr — run `whisper-toggle`
-from a terminal to see it when debugging.
+Full detail goes to stderr — run `whisper-toggle` from a terminal to see it.
 
 ## How it works
 
-```
-┌─────────────┐  raw PCM   ┌──────────────┐  text   ┌──────────┐
-│   parec     ├───────────▶│  faster-     ├────────▶│ ydotool  │
-│ (recorder)  │  16k s16   │  whisper     │         │ (typing) │
-└─────────────┘            └──────────────┘         └──────────┘
-       ▲                          ▲
-       │ subprocess               │ numpy float32
-       │                          │
-┌──────┴──────────────────────────┴────────┐
-│        whisper-toggle (Python)           │
-│  - manages cookie file for toggle        │
-│  - shows KDE OSD via qdbus (auto-detect) │
-└──────────────────────────────────────────┘
-```
-
-With `WHISPER_BACKEND=cloud`, the middle box is swapped for a call to the
-OpenAI transcription API (the captured PCM is wrapped in a WAV container
-and POSTed); the recorder and typing stages are unchanged.
-
-The toggle state is tracked via a cookie file containing the recorder's
-PID. A dead PID is treated as "not running" so a crashed session can
-never lock you out.
+`parec` captures 16 kHz mono PCM to a temp file; on the second toggle,
+faster-whisper (or the OpenAI API, for `cloud`) transcribes it and `ydotool`
+types the result. Toggle state is a cookie file holding the recorder's PID —
+a dead PID reads as "not running", so a crash can never lock you out.
 
 ## Uninstall
 
 ```sh
-./setup.sh uninstall
+./setup.sh uninstall    # keeps the Whisper model cache (asks first)
 ```
 
-Removes everything except the Whisper model cache (asks first).
+## Credits & license
 
-## Credits
-
-The toggle-driven, hotkey-activated dictation UX is inspired by
-[`nerd-dictation`](https://github.com/ideasman42/nerd-dictation) by
-Campbell Barton — worth checking out if you want streaming (live) results
-from VOSK rather than Whisper's batch transcription.
-
-This project builds on:
-
-- [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) — the
-  Whisper inference engine (CTranslate2-backed).
-- [Whisper](https://github.com/openai/whisper) — OpenAI's speech
-  recognition model.
-- [`ydotool`](https://github.com/ReimuNotMoe/ydotool) — Wayland-native
-  input simulation via uinput.
-- [PipeWire](https://pipewire.org/) / `parec` — audio capture.
-
-## License
+UX inspired by [`nerd-dictation`](https://github.com/ideasman42/nerd-dictation).
+Built on [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper),
+[Whisper](https://github.com/openai/whisper),
+[`ydotool`](https://github.com/ReimuNotMoe/ydotool), and
+[PipeWire](https://pipewire.org/)/`parec`.
 
 GPL-3.0-or-later.
