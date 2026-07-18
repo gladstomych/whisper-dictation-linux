@@ -570,7 +570,7 @@ def stop_recording_and_transcribe() -> None:
     stop_recorder(pid)
     # Keep the indicator pinned — now as "transcribing" — through the model/API
     # call, which is the part with no other sign it's still working.
-    _spawn_osd_daemon("media-playback-stop", "⏳ Whisper transcribing…")
+    _spawn_osd_daemon("view-refresh", "Whisper transcribing…")
 
     failure: tuple[str, str] | None = None
     try:
@@ -590,7 +590,7 @@ def stop_recording_and_transcribe() -> None:
         osd(*failure)
         return
 
-    osd("media-playback-stop", "⚫ Whisper done")
+    osd("dialog-ok-apply", "Whisper done")
 
 
 def main() -> int:
