@@ -36,9 +36,9 @@ Not supported:
 ```sh
 git clone <this repo> ~/dev/whisper-dictation
 cd ~/dev/whisper-dictation
-./install.sh install            # local, offline backend (default)
+./setup.sh install            # local, offline backend (default)
 # or, for OpenAI cloud transcription:
-./install.sh install --cloud    # skips the local model; see "Cloud backend" below
+./setup.sh install --cloud    # skips the local model; see "Cloud backend" below
 ```
 
 Then log out + back in (so the `input` group applies) and bind a KDE
@@ -87,6 +87,30 @@ Environment variables (set in your shell or the systemd unit):
 > recordings accumulate until you delete them. Leave it off for normal use;
 > when done debugging, clear the directory (`rm -rf ~/.cache/whisper-dictation`).
 
+### Switching backends
+
+`WHISPER_BACKEND` (`local` or `cloud`) picks the engine. The catch: the KDE
+hotkey runs `whisper-toggle` with the **session** environment, not your shell,
+so the switch must live in `~/.config/environment.d/whisper.conf` (read once at
+login) — not `.bashrc`/fish. Easiest is the helper:
+
+```sh
+./setup.sh backend local     # offline Whisper
+./setup.sh backend cloud      # OpenAI
+```
+
+It sets `WHISPER_BACKEND` in `whisper.conf` (creating it, `chmod 600`,
+preserving your key config) and, for `cloud`, checks a key is reachable.
+**Log out and back in** for the hotkey to pick up the change.
+
+For a quick terminal test without logging out, set it in the shell instead —
+but set it for *both* toggle presses, since the **second** (stop) press is the
+one that transcribes:
+
+```fish
+set -gx WHISPER_BACKEND cloud   # applies to whisper-toggle launched from this shell
+```
+
 ### Cloud backend (OpenAI)
 
 Set `WHISPER_BACKEND=cloud` to transcribe with OpenAI's hosted models
@@ -122,7 +146,7 @@ cheaper and slightly less accurate; `whisper-1` is the original API model.
 No extra Python dependencies are needed — the cloud path uses only the
 standard library.
 
-The quickest setup is `./install.sh install --cloud`, which skips the
+The quickest setup is `./setup.sh install --cloud`, which skips the
 local model download and writes `~/.config/environment.d/whisper.conf`
 (`chmod 600`) with `WHISPER_BACKEND=cloud` and an empty `OPENAI_API_KEY=`
 for you to fill in — then log out and back in.
@@ -159,14 +183,15 @@ secret store and letting whisper-dictation fetch it at transcription time.
 put nothing in `whisper.conf` except the backend:
 
 ```sh
-# store (prompts for the key; --label is cosmetic)
-secret-tool store --label='OpenAI API key' service openai-api-key
+./setup.sh set-key    # prompts for the key (hidden), stores it in KWallet
 # whisper.conf then only needs:  WHISPER_BACKEND=cloud
 ```
 
-whisper-toggle runs `secret-tool lookup service openai-api-key` and KWallet
-unlocks it for the session. Using a different attribute set? Point
-`WHISPER_SECRET_TOOL_ATTRS` at it (must match your `secret-tool store`).
+That wraps `secret-tool store --label='OpenAI API key' service openai-api-key`
+(run it directly if you prefer). whisper-toggle then does
+`secret-tool lookup service openai-api-key` and KWallet unlocks it for the
+session. Using a different attribute set? Point `WHISPER_SECRET_TOOL_ATTRS`
+at it (must match how you stored the key).
 
 **Password manager (`pass`, gopass, 1Password CLI, …).** Set a command that
 prints the key:
@@ -242,7 +267,7 @@ never lock you out.
 ## Uninstall
 
 ```sh
-./install.sh uninstall
+./setup.sh uninstall
 ```
 
 Removes everything except the Whisper model cache (asks first).

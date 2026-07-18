@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# whisper-dictation installer for KDE Plasma on Wayland.
+# whisper-dictation setup for KDE Plasma on Wayland.
 #
-#   ./install.sh install           # install, local (offline) backend
-#   ./install.sh install --cloud   # install, OpenAI cloud backend
-#   ./install.sh uninstall         # undo everything this script installed
+#   ./setup.sh install           # install, local (offline) backend
+#   ./setup.sh install --cloud   # install, OpenAI cloud backend
+#   ./setup.sh backend local     # switch the hotkey to the local backend
+#   ./setup.sh backend cloud     # switch the hotkey to the cloud backend
+#   ./setup.sh set-key           # store your OpenAI key in KWallet (secret-tool)
+#   ./setup.sh uninstall         # undo everything this script installed
 #
-# The --cloud flag configures the OpenAI backend instead of the local one:
-# it writes ~/.config/environment.d/whisper.conf (WHISPER_BACKEND=cloud plus
-# a placeholder for your key, chmod 600) and skips the local Whisper model
-# entirely (no ~460 MB download — transcription happens on OpenAI's servers).
+# Backend selection lives in ~/.config/environment.d/whisper.conf (loaded into
+# the session at login, so the KDE global shortcut sees it). `install --cloud`
+# and `backend` write WHISPER_BACKEND there; a change takes effect after the
+# next log out / back in.
 #
 # Supported distros: any with dnf (Fedora) or apt (Debian/Ubuntu).
 # Supported session: KDE Plasma on Wayland. The script will warn (but not
@@ -262,6 +265,60 @@ EOF
   fi
 }
 
+conf_set_backend() {
+  # Idempotently set WHISPER_BACKEND=<value> in the env.d file, preserving any
+  # other lines (key config, model overrides). Creates the file if absent.
+  local value="$1"
+  mkdir -p "$(dirname -- "$ENVD_CONF")"
+  if [[ -f "$ENVD_CONF" ]]; then
+    local tmp="${ENVD_CONF}.tmp"
+    grep -v '^[[:space:]]*WHISPER_BACKEND=' "$ENVD_CONF" > "$tmp" || true
+    printf 'WHISPER_BACKEND=%s\n' "$value" >> "$tmp"
+    mv "$tmp" "$ENVD_CONF"
+  else
+    cat > "$ENVD_CONF" <<EOF
+# whisper-dictation backend selection (loaded into the session at login).
+WHISPER_BACKEND=${value}
+EOF
+    mark_state "cloud:envd"
+  fi
+  chmod 600 "$ENVD_CONF"
+}
+
+cmd_backend() {
+  local value="${1:-}"
+  case "$value" in
+    local | cloud) ;;
+    *) die "usage: $0 backend <local|cloud>" ;;
+  esac
+  conf_set_backend "$value"
+  info "Backend set to '${value}' in ${ENVD_CONF}"
+  if [[ "$value" == "cloud" ]]; then
+    if command -v secret-tool >/dev/null 2>&1 \
+       && secret-tool lookup service openai-api-key >/dev/null 2>&1; then
+      info "OpenAI key found in KWallet — good to go."
+    else
+      warn "No OpenAI key stored yet. Run:  $0 set-key"
+      warn "(or set OPENAI_API_KEY / OPENAI_API_KEY_CMD in ${ENVD_CONF})"
+    fi
+  fi
+  warn "Log out and back in for the KDE hotkey to pick up the change."
+}
+
+cmd_set_key() {
+  # Store the OpenAI key in the login keyring (KWallet via libsecret) so the
+  # cloud backend can fetch it with `secret-tool lookup` — no plaintext key in
+  # any file or in the process environment.
+  if ! command -v secret-tool >/dev/null 2>&1; then
+    die "secret-tool not found. Install libsecret first: \
+Fedora 'sudo dnf install libsecret', Debian/Ubuntu 'sudo apt install libsecret-tools'."
+  fi
+  info "Storing OpenAI API key in KWallet (you will be prompted; input is hidden)."
+  secret-tool store --label='OpenAI API key' service openai-api-key \
+    || die "secret-tool store failed"
+  info "Stored. The cloud backend reads it via: secret-tool lookup service openai-api-key"
+}
+
 install() {
   info "Installing whisper-dictation stack (backend: ${BACKEND})"
   check_session_scope
@@ -476,14 +533,18 @@ EOF
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 install [--cloud]
-       $0 uninstall
+Usage: $0 <command>
 
-  install            Local (offline) backend. The Whisper model (default:
-                     small, ~460 MB) downloads on first transcription.
-  install --cloud    OpenAI cloud backend. No local model; writes
-                     ${ENVD_CONF}
-                     for you to add OPENAI_API_KEY.
+  install [--cloud]  Install the stack. Default is the local (offline)
+                     backend (Whisper 'small' model, ~460 MB, downloaded on
+                     first transcription). --cloud selects the OpenAI backend
+                     instead: no local model, and writes the env.d config.
+  backend <local|cloud>
+                     Switch the backend for the KDE hotkey by setting
+                     WHISPER_BACKEND in ${ENVD_CONF}
+                     (takes effect after the next log out / back in).
+  set-key            Store your OpenAI API key in KWallet (via secret-tool),
+                     so the cloud backend needs no plaintext key anywhere.
   uninstall          Undo everything this script installed.
 
 To pre-warm the local model:
@@ -510,6 +571,8 @@ case "$cmd" in
     done
     install
     ;;
+  backend)   cmd_backend "${1:-}" ;;
+  set-key)   cmd_set_key ;;
   uninstall) uninstall ;;
   *) usage; exit 1 ;;
 esac
