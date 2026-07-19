@@ -52,6 +52,7 @@ which the KDE shortcut doesn't see.
 | `WHISPER_DEVICE`  | `cpu`   | `cpu` `cuda` (local only)                |
 | `WHISPER_LANG`    | `en`    | ISO 639-1 code                           |
 | `WHISPER_VOCAB_FILE` | `~/.config/whisper-dictation/vocab.txt` | Custom vocabulary (see below) |
+| `WHISPER_KEEP_RECORDINGS` | `5` | Keep the last N recordings to listen back to (`0` off) |
 | `WHISPER_DEBUG`   | *(off)* | `1` archives each session's audio + transcript |
 | `WHISPER_DEBUG_DIR` | `~/.cache/whisper-dictation` | Debug artifact directory |
 
@@ -80,6 +81,22 @@ biasing.
 To build a sheet automatically from a machine's repos, contacts, and Claude
 session history, point a coding agent at [`tools/vocab-agent.md`](tools/vocab-agent.md)
 — it extracts and ranks candidate terms, you approve them, it writes the file.
+
+### Saved recordings
+
+Whisper is not perfect; when it drops or garbles a word, the thought can be
+lost. So the last few recordings are kept as playable WAVs in
+`~/.cache/whisper-dictation/recordings/`, letting you listen back and re-dictate.
+The audio is saved *before* transcription, so even a failed or garbled run
+leaves it behind. The directory auto-prunes to the newest N (default 5):
+
+```sh
+./setup.sh recordings 10   # keep the last 10
+./setup.sh recordings 0    # disable (keep none)
+```
+
+Unlike `WHISPER_DEBUG` (which also saves transcripts and never prunes), this
+keeps audio only and takes effect immediately, without a logout.
 
 ### Translation
 

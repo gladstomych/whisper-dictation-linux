@@ -17,6 +17,9 @@ Configuration via environment variables:
                                        (default: ~/.config/whisper-dictation/vocab.txt)
   WHISPER_COOKIE           path to cookie file             (default: /tmp/whisper-dictation.cookie)
   WHISPER_AUDIO            path to raw PCM temp file        (default: /tmp/whisper-dictation-audio.raw)
+  WHISPER_KEEP_RECORDINGS  keep the last N recordings so you can listen back if a
+                                       transcription goes wrong; 0 disables  (default: 5)
+  WHISPER_RECORDINGS_DIR   where kept recordings go        (default: ~/.cache/whisper-dictation/recordings)
   WHISPER_DEBUG            1 to archive each session's audio + transcript (default: off)
   WHISPER_DEBUG_DIR        where debug artifacts go        (default: ~/.cache/whisper-dictation)
 
@@ -168,6 +171,15 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 DEBUG = os.environ.get("WHISPER_DEBUG", "") not in ("", "0", "false", "False", "no")
 _CACHE = os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache"))
 DEBUG_DIR = Path(os.environ.get("WHISPER_DEBUG_DIR", os.path.join(_CACHE, "whisper-dictation")))
+
+# Keep the last N session recordings (playable WAVs) so a botched or failed
+# transcription doesn't lose the thought — you can listen back. Unlike
+# WHISPER_DEBUG, this auto-prunes to the newest N and stores audio only.
+# 0 disables it. Set via `setup.sh recordings <N>`.
+KEEP_RECORDINGS = max(0, _env_int("WHISPER_KEEP_RECORDINGS", 5))
+RECORDINGS_DIR = Path(
+    os.environ.get("WHISPER_RECORDINGS_DIR", os.path.join(_CACHE, "whisper-dictation", "recordings"))
+)
 
 # Audio capture format (parec args below must stay in sync with these).
 SAMPLE_RATE = 16000
@@ -597,6 +609,27 @@ def _debug_save(name: str, data: bytes) -> None:
         sys.stderr.write(f"whisper-toggle: [debug] save failed: {exc}\n")
 
 
+def _cache_recording(pcm) -> None:
+    """Save this session's audio as a playable WAV, keeping only the newest N.
+
+    Lets the user listen back when a transcription comes out wrong, so the
+    thought isn't lost. Best-effort: never raises into the toggle flow. Runs
+    before transcription, so a failed/garbled transcription still leaves the
+    audio behind. Filenames sort chronologically, so pruning is by name.
+    """
+    if KEEP_RECORDINGS <= 0:
+        return
+    try:
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+        (RECORDINGS_DIR / f"rec-{stamp}.wav").write_bytes(_pcm_to_wav_bytes(pcm))
+        kept = sorted(RECORDINGS_DIR.glob("rec-*.wav"))
+        for old in kept[:-KEEP_RECORDINGS]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        sys.stderr.write(f"whisper-toggle: could not cache recording: {exc}\n")
+
+
 def transcribe_and_type(translate: bool = False) -> None:
     """Load the captured raw PCM, transcribe it, type the result via ydotool."""
     import numpy as np
@@ -619,6 +652,10 @@ def transcribe_and_type(translate: bool = False) -> None:
             "too little audio captured, skipping",
             icon="dialog-information",
         )
+
+    # Keep a rolling copy BEFORE transcribing, so even a garbled or failed
+    # transcription leaves the audio behind to listen back to.
+    _cache_recording(pcm)
 
     if DEFAULT_BACKEND.lower() == "cloud":
         text = _transcribe_cloud(pcm, translate)

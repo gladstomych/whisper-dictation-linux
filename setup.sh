@@ -7,6 +7,7 @@
 #   ./setup.sh backend local     # switch the hotkey to the local backend
 #   ./setup.sh backend cloud     # switch the hotkey to the cloud backend
 #   ./setup.sh model whisper-1   # set the cloud transcription model
+#   ./setup.sh recordings 5      # keep the last 5 recordings to listen back to
 #   ./setup.sh set-key           # store your OpenAI key in KWallet (secret-tool)
 #   ./setup.sh uninstall         # undo everything this script installed
 #
@@ -322,6 +323,22 @@ cmd_model() {
   warn "Log out and back in for the KDE hotkey to pick up the change."
 }
 
+cmd_recordings() {
+  # Set how many recent recordings whisper-dictation keeps (so you can listen
+  # back if a transcription goes wrong). 0 disables. Read at transcribe time,
+  # so this takes effect immediately — no logout needed.
+  local n="${1:-}"
+  [[ "$n" =~ ^[0-9]+$ ]] || die "usage: $0 recordings <N>   (a non-negative integer; 0 disables)"
+  conf_set_var WHISPER_KEEP_RECORDINGS "$n"
+  if [[ "$n" -eq 0 ]]; then
+    info "Recording cache disabled (WHISPER_KEEP_RECORDINGS=0) in ${ENVD_CONF}"
+  else
+    info "Keeping the last ${n} recording(s) (WHISPER_KEEP_RECORDINGS=${n}) in ${ENVD_CONF}"
+    info "Recordings are saved to ~/.cache/whisper-dictation/recordings/"
+  fi
+  warn "Log out and back in for the KDE hotkey to pick up the change."
+}
+
 cmd_set_key() {
   # Store the OpenAI key in the login keyring (KWallet via libsecret) so the
   # cloud backend can fetch it with `secret-tool lookup` — no plaintext key in
@@ -563,6 +580,9 @@ Usage: $0 <command>
   model <name>       Set the cloud transcription model (OPENAI_TRANSCRIBE_MODEL):
                      gpt-4o-mini-transcribe (default) | whisper-1 |
                      gpt-4o-transcribe (drops tail words — not recommended).
+  recordings <N>     Keep the last N session recordings (playable WAVs in
+                     ~/.cache/whisper-dictation/recordings) so you can listen
+                     back if a transcription goes wrong. 0 disables. Default 5.
   set-key            Store your OpenAI API key in KWallet (via secret-tool),
                      so the cloud backend needs no plaintext key anywhere.
   uninstall          Undo everything this script installed.
@@ -593,6 +613,7 @@ case "$cmd" in
     ;;
   backend)   cmd_backend "${1:-}" ;;
   model)     cmd_model "${1:-}" ;;
+  recordings) cmd_recordings "${1:-}" ;;
   set-key)   cmd_set_key ;;
   uninstall) uninstall ;;
   *) usage; exit 1 ;;
